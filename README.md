@@ -1,136 +1,438 @@
 # qiniu_exporter
 
-`qiniu_exporter` 是面向 Prometheus 的七牛云只读 exporter，覆盖：
+[![CI](https://github.com/airsmon/qiniu_exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/airsmon/qiniu_exporter/actions/workflows/ci.yml)
+[![govulncheck](https://github.com/airsmon/qiniu_exporter/actions/workflows/govulncheck.yml/badge.svg)](https://github.com/airsmon/qiniu_exporter/actions/workflows/govulncheck.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-- Kodo（七牛对象存储）的容量、对象数、GET/PUT 请求速率和出网速率。
-- CDN 的带宽、流量、请求量、状态码和缓存命中率。
-- 账户余额、每日预估费用、资源包余量和最近已结算月费用。
+Prometheus exporter for read-only operational and billing metrics from Qiniu
+Cloud.
 
-它只调用固定的统计和财务查询接口。Bucket 和域名必须在配置中显式列出；代码不包含资源发现、创建、删除、更新、上下线、刷新、预取或订单操作。
+`qiniu_exporter` collects metrics from three Qiniu services:
 
-完整的接口取舍、指标语义和调用预算见 [DESIGN.md](./DESIGN.md)。
+- **Kodo** (object storage): capacity, object count, request rate, and egress
+  rate.
+- **CDN**: bandwidth, traffic, request rate, HTTP response rate, and cache hit
+  metrics.
+- **Billing**: account balance, estimated cost, resource-pack usage, and the
+  most recent finalized monthly cost.
 
-## 运行
+The exporter calls only a fixed allowlist of statistics and billing endpoints.
+It does not discover, create, update, delete, publish, refresh, prefetch, or
+otherwise manage Qiniu resources.
 
-要求 Go 1.23 或更高版本。
+## Quick start
+
+Go 1.23 or later is required to run from source.
 
 ```bash
 cp configs/qiniu-exporter.example.yaml config.yaml
+# Edit config.yaml: select modules and replace all example resources.
+# Set billing.enabled to false unless the credential has financial API access.
+
 export QINIU_ACCESS_KEY='...'
 export QINIU_SECRET_KEY='...'
+
 go run ./cmd/qiniu-exporter --config.file=config.yaml
 ```
 
-生产环境建议通过 Secret 文件或环境变量注入 AK/SK。配置文件不接受明文密钥，也不要把密钥放进命令行参数。Kodo、CDN 和 Billing 默认共用这一组凭据；启用 Billing 时必须使用具有财务权限的管理员账号凭据，普通子用户应关闭 `billing.enabled`。若需要隔离管理员凭据，建议把 Billing 单独部署为一个 exporter 实例；该实例仍使用相同的 `QINIU_ACCESS_KEY`、`QINIU_SECRET_KEY` 变量名，并通过网络策略限制出口和抓取来源。
-
-HTTP 端点：
-
-- `/metrics`：只读内存快照，不会在 scrape 路径调用七牛 API。
-- `/healthz`：进程存活。
-- `/readyz`：配置、调度器和 HTTP 服务已经就绪；不把上游短暂故障当作进程未就绪。
-
-Prometheus 示例：
-
-```yaml
-scrape_configs:
-  - job_name: qiniu
-    static_configs:
-      - targets: [qiniu-exporter:9106]
-        labels:
-          qiniu_account: production
-```
-
-一个进程只采集一个七牛账号。账号别名作为 Prometheus target label 注入，不在每条业务指标中重复添加。
-
-最小 Docker 部署示例（先从示例复制并校验 `config.yaml`）：
+In another terminal, verify the process and inspect the exported metrics:
 
 ```bash
-docker build -t qiniu-exporter:local .
-docker run --rm --read-only --cap-drop=ALL \
-  -p 9106:9106 \
-  --env-file ./qiniu-exporter.env \
-  -v "$PWD/config.yaml:/etc/qiniu-exporter/config.yaml:ro" \
-  qiniu-exporter:local
-```
-
-### Docker Compose
-
-仓库内的 [`compose.yaml`](./compose.yaml) 默认从源码构建镜像，只把端口发布到宿主机的 `127.0.0.1:9106`，并通过 Compose secrets 向非 root、只读容器注入一组凭据。先准备配置和仅当前宿主机用户可进入的密钥目录：
-
-```bash
-cp configs/qiniu-exporter.compose.yaml config.yaml
-install -d -m 0700 secrets
-read -rsp 'Qiniu AK: ' QINIU_COMPOSE_AK && printf '%s' "$QINIU_COMPOSE_AK" > secrets/qiniu_access_key && unset QINIU_COMPOSE_AK && echo
-read -rsp 'Qiniu SK: ' QINIU_COMPOSE_SK && printf '%s' "$QINIU_COMPOSE_SK" > secrets/qiniu_secret_key && unset QINIU_COMPOSE_SK && echo
-chmod 0444 secrets/*
-```
-
-编辑 `config.yaml` 中的 bucket、region、CDN 域名和可选资源包 allowlist。时区与单位门禁只有在和七牛控制台核对后才能开启，然后启动并检查端点：
-
-```bash
-docker compose up -d --build
-docker compose logs -f qiniu-exporter
 curl --fail http://127.0.0.1:9106/healthz
 curl --fail http://127.0.0.1:9106/readyz
 curl --fail http://127.0.0.1:9106/metrics
 ```
 
-停止服务使用 `docker compose down`。Compose 的文件型 secret 使用只读 bind mount：为使 UID `65532` 的容器进程可读，密钥文件是 `0444`，但父目录保持 `0700`，其他宿主机用户无法进入。更新密钥时先临时 `chmod 0600`，写入后再恢复 `0444`。`config.yaml`、`*.env` 和 `secrets/` 已加入 `.gitignore`；不要把真实 AK/SK 写入 `.env`、Compose、镜像或仓库。Billing 自动复用同一组 secret，不需要额外凭据文件。
+The example enables all three modules to demonstrate the complete configuration.
+Set `billing.enabled` to `false` before starting unless the supplied credential
+has financial API access. Keep the Kodo/CDN verification gates disabled until
+their timestamps and units have been checked against the Qiniu console.
 
-如需使用已发布镜像，可设置 `QINIU_EXPORTER_IMAGE`；若要对外发布 exporter 端口，显式设置 `QINIU_EXPORTER_BIND_ADDRESS`，并同时限制防火墙和 Prometheus 抓取来源。
+## Collectors and metrics
 
-## Grafana 与 Helm
+Collectors are enabled and scoped through the YAML configuration file. Kodo
+buckets, CDN domains, storage classes, and billing resource-pack tuples must be
+listed explicitly; the exporter performs no resource discovery.
 
-- Grafana Dashboard：导入 [`grafana/qiniu_exporter.json`](./grafana/qiniu_exporter.json)，选择 Prometheus 数据源和 `job`/`instance` 变量。
-- Helm Chart：参见 [`charts/qiniu-exporter/README.md`](./charts/qiniu-exporter/README.md)。Chart 支持内联非敏感配置或现有 Secret，并可选创建 ServiceMonitor 和 PrometheusRule。
+| Collector | Metric families | Labels | Enablement and behavior |
+| --- | --- | --- | --- |
+| Kodo storage | `qiniu_kodo_storage_bytes`, `qiniu_kodo_objects` | `bucket`, `region`, `storage_class` | Requires the Kodo timezone gate. |
+| Kodo activity | `qiniu_kodo_requests_per_second`, `qiniu_kodo_egress_bytes_per_second` | `bucket`, `region`, plus `operation` or `route` | Latest complete five-minute bucket; requires the Kodo timezone gate. |
+| CDN monitoring | `qiniu_cdn_monitoring_bandwidth_bits_per_second`, `qiniu_cdn_monitoring_traffic_bytes_per_second` | `domain`, `region` | Requires the CDN timezone and monitoring-unit gates. |
+| CDN requests and responses | `qiniu_cdn_requests_per_second`, `qiniu_cdn_http_responses_per_second` | `domain,region`; responses also use `code` | Requires the CDN timezone gate; status-code labels are validated. |
+| CDN cache rates | `qiniu_cdn_cache_requests_per_second`, `qiniu_cdn_cache_traffic_bytes_per_second` | `domain,result` | `result` is `hit` or `miss`. |
+| CDN cache ratios | `qiniu_cdn_cache_request_hit_ratio`, `qiniu_cdn_cache_traffic_hit_ratio` | `domain` | Omitted when the corresponding denominator is zero. |
+| Billing balance | `qiniu_billing_available_balance`, `qiniu_billing_unpaid_amount` | `currency` | Requires an account with financial API access. |
+| Billing estimate | `qiniu_billing_estimated_cost`, `qiniu_billing_estimate_period_start_timestamp_seconds`, `qiniu_billing_estimate_period_end_timestamp_seconds` | `currency` on cost | Current estimated billing period. |
+| Billing resource packs | `qiniu_billing_resource_pack_records`, `qiniu_billing_resource_pack_total`, `qiniu_billing_resource_pack_used`, `qiniu_billing_resource_pack_remaining`, `qiniu_billing_resource_pack_remaining_ratio` | `item`, `zone`, `available_time`, `unit` on quantities | Disabled when `resource_pack_allowlist` is empty. Never aggregate across `unit`. |
+| Billing finalized cost | `qiniu_billing_last_finalized_cost`, `qiniu_billing_last_finalized_period_start_timestamp_seconds` | `currency` on cost | Most recently available finalized month. |
+| Exporter health | `qiniu_exporter_*` | Varies by metric | Collector success, freshness, API activity, rate limiting, scheduler, and build information. |
 
-## CI/CD
+The registry also exposes the standard Go runtime and process metric families,
+including `go_*` and `process_*`.
 
-GitHub Actions 会在 Pull Request 和 `main` 分支执行格式检查、Go 测试、竞态检测、Helm lint/render、Prometheus 规则校验以及 `linux/amd64`、`linux/arm64` 镜像冒烟测试。推送 `main` 或语义化 `v*` 标签会发布多架构镜像到当前仓库的 GitHub Container Registry；版本标签还会创建 GitHub Release、二进制压缩包、校验和与 Helm Chart 包。
+Upstream time-bucket values and billing snapshots are gauges, even when they
+represent requests or traffic. They may be corrected or reset by Qiniu and are
+not counters accumulated over the exporter process lifetime.
 
-## 限流策略
+## Requirements
 
-所有上游请求（包括分页和重试）都经过账号/Host 硬限流；Billing 还叠加独立的 1 QPS 子限流。正常采集与最多两次重试分别受独立的 80% attempt-0 和 20% retry 预算约束，并共同受 100% 硬上限约束；Billing 以 Host/子限流中的较小值切分预算，调低任一硬上限或首请求占比都不会反向扩大重试池。响应体完整读取期间也占用并发槽。
+- Go 1.23 or later when building from source
+- Qiniu Access Key and Secret Key with access to the enabled read-only APIs
+- Network access to the required Qiniu API hosts
+- Prometheus or an OpenMetrics-compatible scraper
 
-CDN monitoring 每批最多查询 50 个域名。`400032` 无效域名错误会触发二分隔离，每轮最多 16 个 batch attempt；确认的坏域名在进程生命周期内负缓存，未决域名留到下轮，健康域名继续更新。429 或 `403024` 会触发 Host 级 cooldown 和减半降速，五分钟无新限流后逐步恢复。
+Billing APIs are normally available only to an administrator account. Disable
+`billing.enabled` when using a restricted sub-account. To isolate privileged
+billing credentials, run Billing in a separate exporter instance while keeping
+the standard `QINIU_ACCESS_KEY` and `QINIU_SECRET_KEY` variable names.
 
-新 monitoring 文档没有明确声明两个响应数组的单位。完成控制台对照前保持 `cdn.monitoring_units_verified: false`：exporter 不会调用 bandwidth/flow 接口，也不会发布带单位的 monitoring 指标；在时区门禁已经开启时，analytics 请求量、状态码和命中率不受这个单位门禁影响。确认带宽为 bit/s、流量为五分钟桶 Byte 后再设为 `true`。
+## Installation
 
-Kodo/CDN 的部分时间参数或响应点没有明确时区。示例配置中的 `statistics_timezone_verified` 默认关闭；在测试账号对照控制台确认 exporter 按 `Asia/Shanghai` 解释后，分别设为 `true`。门禁未通过的模块不会调用七牛 API，也不会暴露永久为 0 的 collector success，而会记录 `timezone_unverified` 跳过计数。
+### Build from source
 
-配置加载时会根据 bucket、存储类型和域名数量进行调用预算准入；预算超限时进程拒绝启动。提高代码内的安全上限不受支持，应先缩小 allowlist、降低指标范围或向七牛申请配额。
+```bash
+git clone https://github.com/airsmon/qiniu_exporter.git
+cd qiniu_exporter
+go build -o qiniu-exporter ./cmd/qiniu-exporter
+./qiniu-exporter --version
+```
 
-## 数据与告警语义
+### Docker
 
-七牛返回的历史时间桶和账务快照都导出为 Gauge，不伪装成 exporter 生命周期内的 Counter。上游失败不会把业务值写成 0：最后一次成功快照会保留到 `stale_after`，过期后停止导出业务样本。若上游持续返回同一个冻结时间桶，新请求成功也不会刷新其数据寿命。
+Prepare `config.yaml`, then build the image locally:
 
-资源包的 `item/zone/available_time/unit` 会成为 Prometheus label，因此必须在 `billing.resource_pack_allowlist` 中逐项配置精确四元组；列表为空时 exporter 不调用资源包接口。启用前先从控制台核对账号实际值。示例规则不会把未启用的资源包 collector 当作数据缺失。
+```bash
+cp configs/qiniu-exporter.example.yaml config.yaml
+# Edit config.yaml before starting the container.
+# Disable Billing unless the credential has financial API access.
+docker build -t qiniu-exporter:local .
+```
 
-告警应同时检查：
+Run the exporter with a configuration file and credentials inherited from the
+host environment:
+
+```bash
+export QINIU_ACCESS_KEY='...'
+export QINIU_SECRET_KEY='...'
+
+docker run --rm \
+  --read-only \
+  --cap-drop=ALL \
+  --publish 127.0.0.1:9106:9106 \
+  --env QINIU_ACCESS_KEY \
+  --env QINIU_SECRET_KEY \
+  --volume "$PWD/config.yaml:/etc/qiniu-exporter/config.yaml:ro" \
+  qiniu-exporter:local
+```
+
+CI publishes multi-architecture images to
+`ghcr.io/airsmon/qiniu_exporter`. The `main` branch produces the `main` tag;
+version tags produce semantic-version image tags.
+
+### Helm
+
+The chart supports an existing credential Secret, generated non-sensitive
+configuration, an existing complete configuration Secret, ServiceMonitor, and
+PrometheusRule resources.
+
+See [charts/qiniu-exporter/README.md](./charts/qiniu-exporter/README.md) for
+installation and security guidance.
+
+## Configuration
+
+Copy the example configuration and replace the example resources:
+
+```bash
+cp configs/qiniu-exporter.example.yaml config.yaml
+```
+
+The configuration stores only environment-variable names or Secret file paths.
+It does not accept literal AK/SK values.
+
+```yaml
+server:
+  listen: ":9106"
+
+credentials:
+  main:
+    access_key_env: QINIU_ACCESS_KEY
+    secret_key_env: QINIU_SECRET_KEY
+
+kodo:
+  enabled: true
+  credential: main
+  statistics_timezone_verified: false
+  buckets:
+    - name: example-bucket
+      region: z0
+  storage_classes:
+    - standard
+
+cdn:
+  enabled: true
+  credential: main
+  statistics_timezone_verified: false
+  monitoring_units_verified: false
+  domains:
+    - cdn.example.com
+
+billing:
+  enabled: false
+  credential: main
+  timezone: Asia/Shanghai
+  resource_pack_allowlist: []
+```
+
+This is an intentionally safe skeleton: Billing is disabled and the Kodo/CDN
+verification gates are false, so it initially exposes exporter self-metrics but
+no Qiniu business samples. Enable only the modules and gates that have been
+validated for the account.
+
+Start the exporter:
+
+```bash
+export QINIU_ACCESS_KEY='...'
+export QINIU_SECRET_KEY='...'
+./qiniu-exporter --config.file=config.yaml
+```
+
+Available command-line flags:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--config.file` | `config.yaml` | Path to the YAML configuration file. |
+| `--version` | `false` | Print version information and exit. |
+
+### Verification gates
+
+Some public Qiniu statistics documentation does not define every timestamp or
+unit precisely enough to publish reliable metrics without account-specific
+verification:
+
+- Keep `kodo.statistics_timezone_verified` and
+  `cdn.statistics_timezone_verified` false until API timestamps match the
+  Qiniu console when interpreted in `Asia/Shanghai`.
+- Keep `cdn.monitoring_units_verified` false until monitoring bandwidth and
+  traffic values have been compared with the console.
+
+A collector behind a disabled verification gate does not call its upstream API
+and records a corresponding `timezone_unverified` or `units_unverified`
+scheduler skip. Do not enable a gate merely to make a metric appear.
+
+### Resource-pack allowlist
+
+Resource-pack fields become Prometheus labels, so every permitted tuple must be
+configured exactly:
+
+```yaml
+billing:
+  resource_pack_allowlist:
+    - item: "<exact-item-name-from-Qiniu>"
+      zone: "<exact-zone-name-from-Qiniu>"
+      available_time: "<exact-availability-name-from-Qiniu>"
+      unit: GB
+```
+
+Replace every placeholder with the exact value returned for the account. An
+empty allowlist disables resource-pack API calls and metrics.
+
+## Docker Compose
+
+The included [compose.yaml](./compose.yaml) builds the image from source,
+publishes port `9106` on loopback, runs as UID/GID `65532`, uses a read-only
+root filesystem, and mounts credentials through Compose secrets.
+
+Prepare the configuration and credential files:
+
+```bash
+cp configs/qiniu-exporter.compose.yaml config.yaml
+install -d -m 0700 secrets
+read -rsp 'Qiniu AK: ' QINIU_COMPOSE_AK
+printf '%s' "$QINIU_COMPOSE_AK" > secrets/qiniu_access_key
+unset QINIU_COMPOSE_AK
+printf '\n'
+read -rsp 'Qiniu SK: ' QINIU_COMPOSE_SK
+printf '%s' "$QINIU_COMPOSE_SK" > secrets/qiniu_secret_key
+unset QINIU_COMPOSE_SK
+printf '\n'
+chmod 0444 secrets/qiniu_access_key secrets/qiniu_secret_key
+```
+
+Update the bucket, region, domain, and optional resource-pack allowlist in
+`config.yaml`. Disable Billing unless the credential has financial API access,
+then start the service:
+
+```bash
+docker compose up -d --build
+curl --fail http://127.0.0.1:9106/healthz
+curl --fail http://127.0.0.1:9106/readyz
+curl --fail http://127.0.0.1:9106/metrics
+```
+
+Follow logs separately when needed:
+
+```bash
+docker compose logs -f qiniu-exporter
+```
+
+To use a published release image instead of building locally, replace
+`vX.Y.Z` with a release tag or pin the image by digest:
+
+```bash
+QINIU_EXPORTER_IMAGE=ghcr.io/airsmon/qiniu_exporter:vX.Y.Z \
+  docker compose up -d --no-build
+```
+
+The mutable `main` image tag is intended for testing unreleased development
+builds.
+
+Stop the service with `docker compose down`.
+
+## Prometheus configuration
+
+Add the exporter as a normal static or discovered Prometheus target:
+
+```yaml
+scrape_configs:
+  - job_name: qiniu
+    static_configs:
+      - targets:
+          - qiniu-exporter:9106
+        labels:
+          qiniu_account: production
+```
+
+The exporter exposes these HTTP endpoints:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `/metrics` | Cached Qiniu business metrics and exporter self-metrics. Never calls an upstream API. |
+| `/healthz` | Process liveness. |
+| `/readyz` | Configuration, scheduler, and HTTP server readiness. Transient Qiniu failures do not make the process unready. |
+
+Use collector health and freshness metrics in addition to Prometheus's target
+`up` metric. The bundled rules demonstrate the expected checks:
 
 - `qiniu_exporter_collector_success`
 - `qiniu_exporter_collector_last_success_timestamp_seconds`
 - `qiniu_exporter_collector_stale_after_seconds`
 - `qiniu_exporter_data_timestamp_seconds`
-- 对应的 `qiniu_exporter_resource_*` 指标
+- `qiniu_exporter_resource_*`
 
-CDN/Kodo 公开统计 API 不提供实时请求时延。实时 DNS/TLS/HTTP 可用性应使用 Blackbox Exporter 或应用指标补充。
+The bundled recording and alert rules preserve Prometheus target labels, so
+multiple exporter targets are evaluated independently. Set a unique
+`qiniu_account` target label for each account.
 
-## 联调门槛
+## Operational model
 
-上线前需要使用测试账号完成一次真实 API PoC：
+Qiniu statistics APIs have independent update intervals, source-data delays,
+and account-level rate limits. The exporter therefore polls them in the
+background and publishes immutable in-memory snapshots. A Prometheus scrape of
+`/metrics` never makes an upstream Qiniu API request.
 
-1. 验证 Kodo、CDN 和 Billing 的 IAM 权限与签名。
-2. 对照控制台确认 CDN monitoring 的带宽/流量单位。
-3. 确认 Kodo/CDN 无时区字段的时间点与 `Asia/Shanghai` 解释一致，再开启对应 `statistics_timezone_verified`。
-4. 对照控制台核对一组容量、对象数、状态码、命中率、余额和月账单。
+This model provides predictable scrapes, per-host and per-endpoint rate
+limiting, bounded retries, a shared cooldown after rate-limit responses, and
+explicit collector health and data freshness metrics.
 
-仓库测试使用脱敏 fixture 和本地 HTTP 模拟，不需要真实 AK/SK，也不会访问七牛 API。
+One Qiniu account per exporter process is a deployment requirement. Named
+credentials are supported, but the exporter cannot verify account ownership;
+all credentials selected by modules in one instance must belong to the same
+account. Run one instance per account and attach an account name as a Prometheus
+target label instead of adding it to every exported series.
 
-## 验证
+See [DESIGN.md](./DESIGN.md) for the API selection, metric semantics, polling
+schedule, cardinality limits, and call-budget calculations.
+
+## Failure and stale-data behavior
+
+An upstream error never replaces a business value with zero. The most recent
+successful snapshot remains available until its configured `stale_after`
+duration expires; expired business samples are then omitted. Exporter
+self-metrics remain available throughout the failure.
+
+When Qiniu supplies a source timestamp, freshness is based on the older of the
+collection time and source-data time. Repeatedly receiving the same frozen
+upstream bucket therefore cannot keep stale data alive.
+
+Configuration validation calculates the expected request rate from the number
+of buckets, storage classes, and domains. The exporter refuses to start when a
+collector would exceed its safe call budget. Reduce the allowlist or collected
+scope instead of increasing hard-coded protection limits.
+
+## Dashboards and alerting rules
+
+- Import [grafana/qiniu_exporter.json](./grafana/qiniu_exporter.json) for the
+  bundled Grafana dashboard.
+- Load [rules/qiniu-exporter.rules.yml](./rules/qiniu-exporter.rules.yml) for
+  collector health, stale data, low balance, resource-pack, CDN, and Kodo
+  alerts and recording rules.
+- Enable the chart's ServiceMonitor and PrometheusRule resources when using
+  Prometheus Operator.
+
+Kodo and CDN statistics APIs do not provide real-time request latency. Use the
+[Blackbox Exporter](https://github.com/prometheus/blackbox_exporter) or
+application instrumentation for live DNS, TLS, HTTP availability, and latency
+signals.
+
+## Security
+
+- Use environment variables or mounted Secret files for AK/SK. Never put real
+  credentials in YAML, command-line flags, container images, Git history, or
+  logs.
+- Restrict Qiniu IAM permissions to the configured statistics APIs and, where
+  IAM supports it, the configured resources. CDN statistics actions are
+  service-scoped, so the static domain allowlist provides the operational
+  boundary. The exporter does not require resource-management permissions.
+- Billing may require an administrator credential. Run it separately when that
+  credential should not be shared with Kodo or CDN collection.
+- Bucket names, CDN domains, regions, and billing labels may be visible in
+  `/metrics`. Restrict network access to the exporter endpoint.
+- The HTTP server does not provide built-in TLS or authentication. Bind it to
+  loopback or a private network, or place it behind an authenticated reverse
+  proxy or service mesh.
+- The exporter signs requests only for fixed HTTPS hosts and endpoint paths;
+  the HTTP client cannot be used as a generic Qiniu API proxy.
+
+See [.github/SECURITY.md](./.github/SECURITY.md) for vulnerability reporting.
+
+## Development
+
+Run the local validation suite:
 
 ```bash
+go mod verify
 go test ./...
 go test -race ./...
 go vet ./...
+go build ./cmd/qiniu-exporter
 ```
+
+Validate the deployment artifacts when their tools are available:
+
+```bash
+helm lint charts/qiniu-exporter --strict
+helm template qiniu-exporter charts/qiniu-exporter \
+  --values charts/qiniu-exporter/ci/test-values.yaml
+docker compose -f compose.yaml config
+```
+
+Tests use sanitized fixtures and local HTTP servers. They do not require Qiniu
+credentials and do not call Qiniu APIs.
+
+GitHub Actions validates Go code, race safety, Helm rendering, Prometheus rules,
+Docker Compose, and `linux/amd64` and `linux/arm64` container images. Semantic
+version tags matching `vMAJOR.MINOR.PATCH` publish release archives, checksums,
+a Helm package, and a GitHub Release.
+
+## Contributing
+
+Keep changes within the exporter's read-only monitoring boundary. New upstream
+calls must use fixed endpoint policies, the shared limiter and retry path, and
+bounded labels. Include tests for metric semantics, response validation, stale
+data, and failure behavior. Run the validation commands above before opening a
+pull request.
+
+## License
+
+This project is licensed under the [MIT License](./LICENSE).

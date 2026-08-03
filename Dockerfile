@@ -10,7 +10,9 @@ RUN CGO_ENABLED=0 go build -trimpath \
     -o /out/qiniu-exporter ./cmd/qiniu-exporter
 
 FROM gcr.io/distroless/static-debian12:nonroot
+LABEL org.opencontainers.image.licenses="MIT"
 COPY --from=build /out/qiniu-exporter /qiniu-exporter
+COPY LICENSE /licenses/LICENSE
 EXPOSE 9106
 ENTRYPOINT ["/qiniu-exporter"]
 CMD ["--config.file=/etc/qiniu-exporter/config.yaml"]

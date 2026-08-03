@@ -1,64 +1,66 @@
-# qiniu_exporter 架构设计与指标方案
+# qiniu_exporter Architecture and Metric Design
 
-> 状态：Approved and implemented for MVP（已完成第二轮纯监控与限流复核）  
-> 调研日期：2026-08-03  
-> 范围：七牛对象存储 Kodo、CDN、账户财务；只读采集，不执行任何资源变更或财务操作。
+> Status: MVP implemented and reviewed for monitoring-only scope and rate limiting. Verification with a real account remains required before enabling Kodo/CDN verification gates or Billing in production.
+>
+> Research date: 2026-08-03
+>
+> Scope: Qiniu Kodo object storage, CDN, and account billing; read-only collection with no resource changes or financial operations.
 
-## 1. 结论
+## 1. Conclusion
 
-建议用 Go 实现一个“后台轮询 + 内存快照”的 Prometheus exporter：
+The exporter is implemented in Go with background polling and in-memory snapshots:
 
-- 每个 exporter 实例只采集一个七牛账号；多账号通过部署多个实例实现，账号名由 Prometheus target label 注入。
-- 使用官方 `github.com/qiniu/go-sdk/v7/auth` 完成签名；Kodo、CDN 与财务统计接口使用 `net/http` + 官方 `auth` 包构造固定的只读请求。
-- Kodo、CDN、财务使用独立 poller、限流器、凭证引用和缓存快照；任一模块可独立启停。
-- `/metrics` 不访问七牛 API，只读取不可变快照。上游失败时在数据集允许的陈旧期限内保留上次成功值，同时暴露采集失败和新鲜度；超过期限后停止导出该业务快照。
-- 七牛返回的容量、费用、历史时间桶请求数/流量都导出为 Gauge；只有 exporter 自身累计的请求数使用 Counter。
-- MVP 不采集对象 key、URL、IP、订单号、账单 ID 等高基数或敏感维度。
-- CDN/Kodo 的公开统计 API 没有实时请求时延；Kodo 还没有状态码/错误率。此类 SLI 由 Blackbox Exporter、应用指标或第二阶段日志处理补齐。
+- The supported deployment model is one Qiniu account per exporter instance. Configuration can name multiple credential sources, but every enabled module in one instance must use credentials belonging to the same account; credential ownership cannot be verified locally. Deploy multiple instances for multiple accounts and inject the account name as a Prometheus target label.
+- Use the official `github.com/qiniu/go-sdk/v7/auth` package for signing. Build fixed, read-only requests for the Kodo, CDN, and billing statistics APIs with `net/http` and the official `auth` package.
+- Kodo, CDN, and billing use independent pollers, limiters, credential references, and cached snapshots. Each module can be enabled or disabled independently.
+- `/metrics` does not access the Qiniu APIs; it only reads immutable snapshots. When an upstream request fails, retain the last successful values within the staleness period allowed for that dataset while exposing collection failure and freshness. Stop exporting the business snapshot after that period expires.
+- Export capacity, cost, historical time-bucket request counts, and historical time-bucket traffic returned by Qiniu as Gauges. Only exporter-owned cumulative event metrics use Counters.
+- The MVP does not collect high-cardinality or sensitive dimensions such as object keys, URLs, IP addresses, order numbers, or bill IDs.
+- The public CDN and Kodo statistics APIs do not provide real-time request latency, and Kodo also does not provide status codes or error rates. Use Blackbox Exporter, application metrics, or a phase-two log pipeline to fill these SLI gaps.
 
-### 1.1 纯监控边界
+### 1.1 Monitoring-only Boundary
 
-主进程只实现运营/运维统计查询。bucket、domain、region 和启用的存储类型均来自静态 allowlist；MVP 不调用资源管理域的发现接口。
+The main process implements only operational statistics queries. Buckets, domains, Kodo regions, and enabled storage classes come from static configuration. CDN regions returned by the API are accepted only from fixed, validated enums. The MVP does not call discovery APIs in the resource-management domain.
 
-代码中不实现任何创建、查询详情、删除、更新、上下线、刷新、预取、订单取消等资源管理方法，也不导出这些操作的次数、结果或状态指标。统计和财务 client 使用明确的 endpoint allowlist，不能做成可调用任意七牛 API 的通用 client。
+The code does not implement any resource-management method for creating, retrieving details, deleting, updating, bringing online or offline, refreshing, prefetching, or canceling orders. It also does not export counts, results, or status metrics for those operations. Statistics and billing clients use explicit endpoint allowlists and must not become general-purpose clients capable of calling arbitrary Qiniu APIs.
 
-推荐技术基线：Go 1.23+（当前 Prometheus Go client 的最低版本），七牛 Go SDK 固定到实施时已验证的版本。调研时最新版本为 [`v7.27.0`](https://pkg.go.dev/github.com/qiniu/go-sdk/v7)，不要使用无版本约束的浮动依赖。
+Recommended technical baseline: Go 1.23+ (the minimum version supported by the current Prometheus Go client), with the Qiniu Go SDK pinned to a version verified during implementation. The latest version at the time of research was [`v7.27.0`](https://pkg.go.dev/github.com/qiniu/go-sdk/v7); do not use an unconstrained floating dependency.
 
-## 2. 前提与非目标
+## 2. Assumptions and Non-goals
 
-### 2.1 当前假设
+### 2.1 Current Assumptions
 
-- 首版是单账号 exporter，不在一个进程中维护多套账号。
-- Prometheus scrape 周期为 15～60 秒，但七牛业务 API 按各自数据更新周期轮询。
-- 必须显式配置 bucket/domain allowlist；新增资源通过配置变更纳入监控。
-- 财务时区固定为 `Asia/Shanghai`；Kodo/CDN 时间字段的时区必须在 PoC 中用真实账号确认，确认前由各模块的 `statistics_timezone_verified=false` 运行时门禁阻止调用和发布。
-- exporter 只需要当前状态、最新完整时间桶、本月预估和最近已结算月份，不承担历史账本或报表职责。
+- One account per process is a deployment requirement. The configuration parser supports named credentials but cannot verify that different AK/SK pairs belong to the same account.
+- The Prometheus scrape interval is 15-60 seconds, while Qiniu business APIs are polled according to their respective data-update intervals.
+- Bucket and domain allowlists must be configured explicitly. Add new resources to monitoring through configuration changes.
+- The billing timezone is fixed to `Asia/Shanghai`. The timezones of Kodo and CDN time fields must be confirmed with a real account during the PoC. Until confirmed, the `statistics_timezone_verified=false` runtime gate for each module prevents both calls and publication.
+- The exporter only needs current state, the latest complete time bucket, the current-month estimate, and the most recently finalized month. It is not a historical ledger or reporting system.
 
-### 2.2 首版不做
+### 2.2 Not Included in the Initial Release
 
-- 不调用创建、修改、删除、刷新、预取、取消订单等写接口。
-- 不把 Top URL、Top IP、对象 key、客户端 IP、User-Agent 或 Referer 放入 Prometheus。
-- 不持久化 24 个月财务明细，也不把 `month=YYYY-MM` 作为持续增长的 label。
-- 不在 exporter 内进行有写入副作用的 Kodo PUT/DELETE 合成探测。
-- 不在主 exporter 中下载或解析访问日志；如后续需要，作为独立日志流水线建设。
-- 不提供订单、分账、历史账本和任意资源管理接口，即使它们是只读接口也不属于本 exporter。
+- Do not call write APIs that create, modify, delete, refresh, prefetch, or cancel orders.
+- Do not put Top URLs, Top IPs, object keys, client IPs, User-Agent values, or Referer values into Prometheus.
+- Do not persist 24 months of billing details or use `month=YYYY-MM` as a continuously growing label.
+- Do not perform synthetic Kodo PUT/DELETE probes with write side effects inside the exporter.
+- Do not download or parse access logs in the main exporter. If needed later, build this as a separate log pipeline.
+- Do not expose order, cost-allocation, historical-ledger, or arbitrary resource-management APIs, even when they are read-only.
 
-## 3. 总体架构
+## 3. Overall Architecture
 
 ```mermaid
 flowchart LR
     P["Prometheus"] -->|"GET /metrics"| C["Prometheus collectors"]
-    C --> S["原子化内存快照"]
+    C --> S["Atomic in-memory snapshots"]
 
-    SCH["后台调度器<br/>周期、抖动、超时"] --> K["Kodo client"]
+    SCH["Background scheduler<br/>intervals, jitter, timeouts"] --> K["Kodo client"]
     SCH --> D["CDN client"]
     SCH --> B["Billing client"]
 
-    K -->|"成功后发布"| S
-    D -->|"成功后发布"| S
-    B -->|"成功后发布"| S
+    K -->|"Publish after success"| S
+    D -->|"Publish after success"| S
+    B -->|"Publish after success"| S
 
-    A["官方 auth/SDK<br/>请求签名"] --> K
+    A["Official auth/SDK<br/>request signing"] --> K
     A --> D
     A --> B
 
@@ -67,307 +69,308 @@ flowchart LR
     B --> BA["api.qiniu.com/billing-api"]
 ```
 
-核心行为：
+Core behavior:
 
-1. 每个 dataset 独立调度、独立超时、独立发布快照。
-2. 先完整校验响应，再替换快照。全局数据以 dataset 为原子边界；逐 bucket/domain 扇出的数据以 `dataset + resource` 为原子边界，允许健康资源继续更新，并单独记录资源新鲜度。
-3. 请求失败时不把业务值写成 0，也不立即清空旧快照；更新 `collector_success=0`。超过 dataset 的 `stale_after` 后停止导出旧业务样本，自监控指标仍保留。
-4. 首次采集尚未成功时，只暴露 exporter 自监控指标，业务样本缺失。
-5. `/healthz` 表示进程存活；`/readyz` 只检查配置、HTTP 服务和调度器已就绪，不依赖上游首次成功。上游状态完全由采集成功与新鲜度指标表达。
+1. Each dataset has independent scheduling, timeout, and snapshot publication.
+2. Validate a response completely before replacing a snapshot. Global data uses the dataset as its atomic boundary. Data fanned out by bucket or domain uses `dataset + resource` as its atomic boundary, allowing healthy resources to keep updating while recording freshness separately for each resource.
+3. On request failure, do not write business values as 0 or immediately clear old snapshots. Set `collector_success=0`. Stop exporting stale business samples after the dataset's `stale_after` period; keep self-monitoring metrics.
+4. Before the first successful collection, expose only exporter self-monitoring metrics; business samples are absent.
+5. `/healthz` indicates that the process is alive. `/readyz` checks only that configuration, the HTTP service, and the scheduler are ready; it does not depend on the first successful upstream request. Collection-success and freshness metrics fully represent upstream status.
 
-Prometheus 通常建议 exporter 在 scrape 时同步采集，但也允许昂贵数据缓存。七牛接口具有低频更新、跨资源扇出和明确限流，因此这里选择后台缓存是有意的例外；数据新鲜度必须成为一等指标。参考 [Prometheus exporter 指南](https://prometheus.io/docs/instrumenting/writing_exporters/)。
+Prometheus generally recommends synchronous collection during a scrape, but permits caching expensive data. Qiniu APIs update infrequently, fan out across resources, and have explicit rate limits, so background caching is an intentional exception here. Data freshness must be treated as a first-class metric. See the [Prometheus exporter guidelines](https://prometheus.io/docs/instrumenting/writing_exporters/).
 
-## 4. API、SDK 与认证矩阵
+## 4. API, SDK, and Authentication Matrix
 
-| 模块 | Host / API | 鉴权 | SDK 策略 | 已知限制 |
+| Module | Host / API | Authentication | SDK strategy | Known limitations |
 |---|---|---|---|---|
-| Kodo 统计 | `https://api.qiniuapi.com/v6/*` | Qiniu v2；`X-Qiniu-Date` | 自定义只读 client + `auth.AddToken(TokenQiniu, req)` | 约 5 分钟延迟；公开文档未给 QPS、最大点数和统一时区 |
-| CDN 用量/运营 | `https://fusion.qiniuapi.com/v2/tune/*` | QBox | 核心 monitoring/analytics 使用固定只读 REST client + 官方 auth | 5～10 QPS；与同账号其他调用共享配额 |
-| 财务 | 仅四个固定 GET：`balance-overview`、`bill/snapshot`、`respack/month-overview`、`bill/detail` | Qiniu v2 | 自定义固定 GET client + 官方 auth | 未公布 QPS；公开文档未给财务 IAM action |
+| Kodo statistics | `https://api.qiniuapi.com/v6/*` | Qiniu v2; `X-Qiniu-Date` | Custom read-only client + `auth.AddToken(TokenQiniu, req)` | Approximately 5 minutes of latency; public documentation does not specify QPS, maximum data points, or a consistent timezone |
+| CDN monitoring/analytics | `https://fusion.qiniuapi.com/v2/tune/*` | QBox | Fixed read-only REST client for core monitoring/analytics + official auth | 5-10 QPS; shares the quota with other callers using the same account |
+| Billing | Only four fixed GET endpoints: `balance-overview`, `bill/snapshot`, `respack/month-overview`, and `bill/detail` | Qiniu v2 | Custom fixed-GET client + official auth | QPS is unpublished; public documentation does not specify billing IAM actions |
 
-### 4.1 签名实现约束
+### 4.1 Signing Constraints
 
-- 统一使用 [`auth.Credentials`](https://pkg.go.dev/github.com/qiniu/go-sdk/v7/auth)：`auth.New(ak, sk)` 后按接口调用 `AddToken(TokenQiniu|TokenQBox, req)`，不重复实现 HMAC 算法。
-- Qiniu v2 签名覆盖 method、path/query、Host、Content-Type、相关 `X-Qiniu-*` 头及可签名 body；请求必须先完整构造再签名。
-- QBox 签名规则不同，CDN `fusion.qiniuapi.com` 不能误用 Qiniu v2。
-- 每次重试都要重建可重放 body；先取得 limiter token，再刷新日期头并重新签名，避免排队让签名变旧，且不能复用旧 Authorization。
-- 生产 transport 只允许 `https`、精确 Host 和固定 method/path；显式 `Host` override 会在签名前拒绝。
-- Kodo 的 Qiniu v2 时间头存在允许偏差，财务日界线和统计时间窗也依赖准确时钟；宿主机必须保持 NTP 同步。
-- 财务文档示例没有强制 `X-Qiniu-Date`，不要在未联调前把它当作财务 API 的必需头。
+- Always use [`auth.Credentials`](https://pkg.go.dev/github.com/qiniu/go-sdk/v7/auth): call `auth.New(ak, sk)`, then call `AddToken(TokenQiniu, req)` or `AddToken(TokenQBox, req)`, as appropriate. Do not reimplement the HMAC algorithm.
+- Qiniu v2 signing covers the method, path/query, Host, Content-Type, relevant `X-Qiniu-*` headers, and any signable body. Construct the request completely before signing it.
+- QBox uses different signing rules; do not use Qiniu v2 for `fusion.qiniuapi.com` CDN requests.
+- Rebuild the replayable body for every retry. Acquire the limiter token first, then refresh the date header and sign again so queueing does not leave a stale signature. Never reuse the old Authorization header.
+- The production transport permits only `https`, an exact Host, and fixed method/path combinations. Reject an explicit `Host` override before signing.
+- Qiniu v2 date headers allow only limited clock skew, and billing day boundaries and statistics windows also depend on accurate time. The host must maintain NTP synchronization.
+- Billing documentation examples do not require `X-Qiniu-Date`. Do not treat it as mandatory for the billing API until integration testing confirms it.
 
-### 4.2 SDK 使用边界
+### 4.2 SDK Boundary
 
-七牛 Go SDK 已提供：
+The Qiniu Go SDK provides:
 
-- `auth`：Qiniu/QBox 请求签名。
+- `auth`: Qiniu/QBox request signing.
 
-SDK 未完整覆盖 Kodo `/v6/*` 统计、CDN 新 monitoring/analytics、财务 API，因此这些部分使用小型类型化 REST client；DTO 只建模实际使用字段。
+The SDK does not fully cover Kodo `/v6/*` statistics, the newer CDN monitoring/analytics APIs, or the billing APIs. Use small typed REST clients for those areas, with DTOs that model only the fields actually used.
 
-## 5. 对象存储 Kodo
+## 5. Kodo Object Storage
 
-官方入口：[Kodo 数据统计接口](https://developer.qiniu.com/kodo/3906/statistic-interface)。
+Official entry point: [Kodo Data Statistics APIs](https://developer.qiniu.com/kodo/3906/statistic-interface).
 
-### 5.1 必要接口
+### 5.1 Required APIs
 
-| 优先级 | 数据集 | 接口 | 用途与转换 |
+| Priority | Dataset | API | Purpose and conversion |
 |---|---|---|---|
-| P0 | 容量 | `/v6/space`、`space_line`、`space_intelligent_tiering`、`space_archive_ir`、`space_archive`、`space_deep_archive` | 各存储类型时点容量，Byte；当天固定 `g=5min`，取最新完整点 |
-| P0 | 对象数 | 对应的 `/v6/count*` 六组独立接口 | 对象数单位为个；不是单个 `/v6/count?storage_type=...` |
-| P0 | GET/出网 | `/v6/blob_io` | `hits`；`flow_out`/`cdn_flow_out` 单位 Byte；固定 `g=5min` |
-| P0 | 客户业务 PUT 次数 | `/v6/rs_put?select=hits` | 只读查询客户业务产生的 PUT 请求数；exporter 本身不执行对象 PUT；固定 `g=5min` |
+| P0 | Capacity | `/v6/space`, `/v6/space_line`, `/v6/space_intelligent_tiering`, `/v6/space_archive_ir`, `/v6/space_archive`, `/v6/space_deep_archive` | Point-in-time capacity for each storage class, in bytes; use fixed `g=5min` for the current day and select the latest complete point |
+| P0 | Object count | The six corresponding `/v6/count*` endpoints | Object count; these are not a single `/v6/count?storage_type=...` endpoint |
+| P0 | GET/egress | `/v6/blob_io` | `hits`; `flow_out`/`cdn_flow_out` in bytes; fixed `g=5min` |
+| P0 | Customer workload PUT count | `/v6/rs_put?select=hits` | Read-only query for PUT requests generated by the customer's workload; the exporter does not perform object PUTs; fixed `g=5min` |
 
-当前容量/对象接口的 `begin` 为闭区间、`end` 为开区间，格式 `YYYYMMDDHHmmss`；历史通常只支持 day，当天支持 5min/hour/day。`blob_io`、`rs_put` 支持 5min/hour/day/month。当前实现只使用上述 P0 端点；旧统计、跨区域任务和提前删除分析不进入 MVP。
+For the current capacity/object APIs, `begin` is inclusive and `end` is exclusive, both formatted as `YYYYMMDDHHmmss`. Historical data usually supports only day granularity; the current day supports 5min/hour/day. `blob_io` and `rs_put` support 5min/hour/day/month. The current implementation uses only the P0 endpoints above. Legacy statistics, cross-region tasks, and early-deletion analysis are outside the MVP.
 
-存储类型映射固定为：
+The storage-class mapping is fixed:
 
-| `storage_class` | 七牛含义 | `$ftype`（用于 I/O，可选） |
+| `storage_class` | Qiniu meaning | `$ftype` (optional for I/O) |
 |---|---|---|
-| `standard` | 标准存储 | `0` |
-| `ia` | 低频存储 | `1` |
-| `archive` | 归档存储 | `2` |
-| `deep_archive` | 深度归档存储 | `3` |
-| `archive_ir` | 归档直读 | `4` |
-| `intelligent_tiering` | 智能分层 | `5` |
+| `standard` | Standard storage | `0` |
+| `ia` | Infrequent Access storage | `1` |
+| `archive` | Archive storage | `2` |
+| `deep_archive` | Deep Archive storage | `3` |
+| `archive_ir` | Archive Instant Retrieval | `4` |
+| `intelligent_tiering` | Intelligent-Tiering storage | `5` |
 
-P0 的请求与流量按 bucket 聚合，不带 `storage_class`，避免为六种 `$ftype` 再扩大 6 倍调用量；MVP 不提供按存储类型拆分 I/O 的 collector。
+P0 request and traffic statistics are aggregated by bucket without a `storage_class` label, avoiding a sixfold increase in calls for the six `$ftype` values. The MVP does not provide an I/O collector broken down by storage class.
 
-### 5.2 P0 指标
+### 5.2 P0 Metrics
 
-| 指标 | 类型 | Labels | 语义 |
+| Metric | Type | Labels | Semantics |
 |---|---|---|---|
-| `qiniu_kodo_storage_bytes` | Gauge | `bucket,region,storage_class` | 最新完整点的存储容量 |
-| `qiniu_kodo_objects` | Gauge | `bucket,region,storage_class` | 最新完整点的对象数量 |
-| `qiniu_kodo_requests_per_second` | Gauge | `bucket,region,operation` | 最新完整桶的平均请求速率；operation 为 `get`/`put` |
-| `qiniu_kodo_egress_bytes_per_second` | Gauge | `bucket,region,route` | 最新完整桶的平均出网速率；route 为 `direct`/`cdn_origin` |
+| `qiniu_kodo_storage_bytes` | Gauge | `bucket,region,storage_class` | Storage capacity at the latest complete point |
+| `qiniu_kodo_objects` | Gauge | `bucket,region,storage_class` | Object count at the latest complete point |
+| `qiniu_kodo_requests_per_second` | Gauge | `bucket,region,operation` | Average request rate for the latest complete bucket; `operation` is `get`/`put` |
+| `qiniu_kodo_egress_bytes_per_second` | Gauge | `bucket,region,route` | Average egress rate for the latest complete bucket; `route` is `direct`/`cdn_origin` |
 
-`blob_io`、`rs_put` 返回的是历史区间增量，不是 exporter 生命周期内的单调累计值。因此不得命名为 `_total` 或伪装成 Counter。P0 固定请求 `g=5min` 并除以 300；同时校验时间点对齐、相邻点确为 5 分钟。缺桶或只有无法确认窗口的单点时不导出速率。以后支持其他粒度时按请求粒度的定义窗口换算，不能用缺桶后的相邻点差猜测覆盖时长。
+`blob_io` and `rs_put` return increments over historical intervals, not monotonically increasing values over the exporter process lifetime. Therefore, their metrics must not use a `_total` suffix or masquerade as Counters. P0 always requests `g=5min` and divides by 300. It also validates point alignment and verifies that adjacent points are exactly 5 minutes apart. Do not export a rate when a bucket is missing or only one point is available and its window cannot be confirmed. If other granularities are supported later, convert using the defined duration of the requested granularity; do not infer coverage from the distance between points across missing buckets.
 
-### 5.3 Kodo 运维缺口
+### 5.3 Kodo Operational Gaps
 
-公开统计 API 不提供 HTTP 状态码、错误率、请求延迟、P95/P99。可选的 [空间访问日志](https://developer.qiniu.com/kodo/8614/space-access-log) 约每 10 分钟写入日志 bucket，包含 HTTP Status、RequestTime、SentBytes 等字段，可在第二阶段用独立日志处理器生成 SLI。实时可用性优先由应用指标或主动探测承担。
+The public statistics APIs do not provide HTTP status codes, error rates, request latency, P95, or P99. The optional [bucket access logs](https://developer.qiniu.com/kodo/8614/space-access-log) are written to a log bucket approximately every 10 minutes and contain fields such as HTTP Status, RequestTime, and SentBytes. A separate phase-two log processor can generate SLIs from these logs. Application metrics or active probes should provide real-time availability first.
 
 ## 6. CDN
 
-七牛 CDN API 体系存在“双 Host、双鉴权”，但本 exporter 不进入域名管理域，只调用 `fusion.qiniuapi.com + QBox` 的统计接口。官方总览见 [CDN API 列表](https://developer.qiniu.com/fusion/13353/fusion-api-overview)。
+Qiniu's CDN APIs use two hosts and two authentication schemes, but this exporter does not use domain-management endpoints. It calls only statistics endpoints through `fusion.qiniuapi.com` with QBox authentication. See the official [CDN API overview](https://developer.qiniu.com/fusion/13353/fusion-api-overview).
 
-### 6.1 必要接口
+### 6.1 Required APIs
 
-| 优先级 | 数据集 | 接口 | 关键约束 |
+| Priority | Dataset | API | Key constraints |
 |---|---|---|---|
-| P0 | 实时监控带宽 | `POST /v2/tune/monitoring/bandwidth` | domains 是分号字符串，最多 50；5min/hour/day |
-| P0 | 实时监控流量 | `POST /v2/tune/monitoring/flow` | 同上；监控数据保留 90 天 |
-| P0 | 请求量 | `POST /v2/tune/loganalyze/reqcount` | domains 是数组；5min/1hour/1day |
-| P0 | 状态码 | `POST /v2/tune/loganalyze/statuscode` | 返回 `codes[statusCode]` 时间序列；保留响应键并在 PoC 确认其粒度 |
-| P0 | 命中率 | `POST /v2/tune/loganalyze/hitmiss` | 返回 hit/miss 次数和命中/未命中流量，由 exporter 算比例 |
+| P0 | Real-time monitoring bandwidth | `POST /v2/tune/monitoring/bandwidth` | `domains` is a semicolon-delimited string, maximum 50; 5min/hour/day |
+| P0 | Real-time monitoring traffic | `POST /v2/tune/monitoring/flow` | Same as above; monitoring data is retained for 90 days |
+| P0 | Request volume | `POST /v2/tune/loganalyze/reqcount` | `domains` is an array; 5min/1hour/1day |
+| P0 | Status codes | `POST /v2/tune/loganalyze/statuscode` | Returns `codes[statusCode]` time series; preserve response keys and confirm their granularity during the PoC |
+| P0 | Cache hits | `POST /v2/tune/loganalyze/hitmiss` | Returns hit/miss counts and hit/miss traffic; the exporter calculates ratios |
 
-CDN 用量接口一次最多 50 个域名，响应保留 domain 维度，可以批量。运营统计虽然允许最多 100 个域名，但响应结构没有 domain 维度；要输出每域名指标，MVP 每次只查询一个域名。这个聚合行为列为 PoC 必验项。
+CDN usage APIs accept at most 50 domains per request and preserve the domain dimension in responses, so they can be batched. Although analytics APIs accept up to 100 domains, their response structures do not include a domain dimension. To emit per-domain metrics, the MVP queries only one domain at a time. This aggregation behavior is a mandatory PoC check.
 
-域名完全来自显式 allowlist。批量 monitoring 遇到 `400032` 时通过二分找出坏域名并负缓存，同时将其标记为配置错误，避免一个失效域名冻结整批数据。每轮二分最多执行 16 个 batch attempt（每个 attempt 最多调用 bandwidth、flow 各一次）；预算耗尽的域名本轮失败但不进入负缓存，下轮再判断。
+Domains come exclusively from an explicit allowlist. When batch monitoring encounters `400032`, use binary splitting to find invalid domains and negative-cache them, while marking each as a configuration error so one invalid domain cannot freeze the entire batch. Each round permits at most 16 batch attempts for binary splitting; each attempt may call bandwidth and flow at most once. Domains left unresolved when the budget is exhausted fail for that round but are not added to the negative cache, so the next round evaluates them again.
 
-### 6.2 P0 指标
+### 6.2 P0 Metrics
 
-| 指标 | 类型 | Labels | 语义 |
+| Metric | Type | Labels | Semantics |
 |---|---|---|---|
-| `qiniu_cdn_monitoring_bandwidth_bits_per_second` | Gauge | `domain,region` | 最新完整监控桶带宽 |
-| `qiniu_cdn_monitoring_traffic_bytes_per_second` | Gauge | `domain,region` | 最新完整监控桶流量除以桶秒数 |
-| `qiniu_cdn_requests_per_second` | Gauge | `domain,region` | reqcount 最新完整桶平均 RPS |
-| `qiniu_cdn_http_responses_per_second` | Gauge | `domain,region,code` | 状态码平均 RPS；保留 API 返回的受控 code 原值，不假定一定是类别或精确码 |
-| `qiniu_cdn_cache_requests_per_second` | Gauge | `domain,result` | hit/miss 请求数除以桶秒数；result 为 `hit`/`miss` |
-| `qiniu_cdn_cache_traffic_bytes_per_second` | Gauge | `domain,result` | hit/miss 流量除以桶秒数 |
-| `qiniu_cdn_cache_request_hit_ratio` | Gauge | `domain` | `hit / (hit + miss)`，范围 0～1 |
-| `qiniu_cdn_cache_traffic_hit_ratio` | Gauge | `domain` | `trafficHit / (trafficHit + trafficMiss)`，范围 0～1 |
+| `qiniu_cdn_monitoring_bandwidth_bits_per_second` | Gauge | `domain,region` | Bandwidth in the latest complete monitoring bucket |
+| `qiniu_cdn_monitoring_traffic_bytes_per_second` | Gauge | `domain,region` | Traffic in the latest complete monitoring bucket divided by bucket duration in seconds |
+| `qiniu_cdn_requests_per_second` | Gauge | `domain,region` | Average RPS in the latest complete `reqcount` bucket |
+| `qiniu_cdn_http_responses_per_second` | Gauge | `domain,region,code` | Average response rate by status code; preserve the validated `code` value returned by the API without assuming that it is necessarily a category or an exact code |
+| `qiniu_cdn_cache_requests_per_second` | Gauge | `domain,result` | Hit/miss request count divided by bucket duration in seconds; `result` is `hit`/`miss` |
+| `qiniu_cdn_cache_traffic_bytes_per_second` | Gauge | `domain,result` | Hit/miss traffic divided by bucket duration in seconds |
+| `qiniu_cdn_cache_request_hit_ratio` | Gauge | `domain` | `hit / (hit + miss)`, range 0-1 |
+| `qiniu_cdn_cache_traffic_hit_ratio` | Gauge | `domain` | `trafficHit / (trafficHit + trafficMiss)`, range 0-1 |
 
-监控 bandwidth/flow 文档没有再次明确响应单位，虽然语义预计沿用 bps/Byte，但正式启用上述带单位指标前必须用控制台和真实响应完成单位校验。配置 `cdn.monitoring_units_verified` 默认 `false`；未确认时不调用这两个接口，记录 `reason="units_unverified"` 的调度跳过且不创建永久失败状态，不发布单位相关业务样本。确认带宽为 bit/s、流量为五分钟桶 Byte 后才可设为 `true`。所有 CDN 采集还受 `statistics_timezone_verified` 门禁约束。
+The monitoring bandwidth/flow documentation does not restate the response units. Although they are expected to remain bps/bytes, verify them against the console and real responses before enabling the unit-bearing metrics above. The `cdn.monitoring_units_verified` setting defaults to `false`. When units are unverified, do not call these two endpoints; record a scheduling skip with `reason="units_unverified"`, do not create a permanent failure state, and do not publish unit-dependent business samples. Set the option to `true` only after confirming that bandwidth is in bit/s and traffic is the number of bytes in a five-minute bucket. All CDN collection is also subject to the `statistics_timezone_verified` gate.
 
-### 6.3 CDN 运维缺口
+### 6.3 CDN Operational Gaps
 
-公开运营统计 API 没有实时响应时延。CDN 访问日志包含 `ResponseTime`（毫秒），但约 6 小时延迟，不适合实时故障告警。建议：
+The public analytics APIs do not provide real-time response latency. CDN access logs contain `ResponseTime` in milliseconds, but arrive with approximately six hours of delay and are unsuitable for real-time incident alerts. Recommendations:
 
-- 实时域名可用性、DNS/TLS/HTTP 时延：Blackbox Exporter。
-- 七牛侧历史 P50/P95/P99：第二阶段异步解析已完成小时的 CDN 日志。
-- Top URL/IP：只进入日志/报表系统，不进入 Prometheus。
+- Real-time domain availability and DNS/TLS/HTTP latency: Blackbox Exporter.
+- Historical Qiniu-side P50/P95/P99: asynchronously parse completed hourly CDN logs in phase two.
+- Top URLs/IPs: send only to logging/reporting systems, not Prometheus.
 
-## 7. 财务
+## 7. Billing
 
-官方入口：[财务对外 API 文档](https://developer.qiniu.com/af/10420/financial-external-api-documentation)。财务数据是低频账务快照，不应按 Prometheus scrape 周期请求。
+Official entry point: [Billing External API Documentation](https://developer.qiniu.com/af/10420/financial-external-api-documentation). Billing data consists of low-frequency accounting snapshots and must not be requested at the Prometheus scrape interval.
 
-### 7.1 必要接口
+### 7.1 Required APIs
 
-| 优先级 | 数据集 | 接口 | 用途与时间语义 |
+| Priority | Dataset | API | Purpose and time semantics |
 |---|---|---|---|
-| P0 | 余额 | `GET /billing-api/v1/account/balance-overview` | 可用额度、欠费、现金/赠送金/信用额度；预估字段只作交叉校验 |
-| P0 | 每日预估 | `GET /billing-api/v2/bill/snapshot?date=...` | 当天 08:00 后查询；当月 1 日至查询日 00:00，不含查询日 |
-| P0 | 资源包 | `GET /billing-api/v1/respack/month-overview` | 本月总可用、已用、剩余；分页最大 200 |
-| P0 | 最终月账单 | `GET /billing-api/v2/bill/detail?start=...&end=...` | 使用顶层 `total_money`；每月 5 日后读取上月 |
+| P0 | Balance | `GET /billing-api/v1/account/balance-overview` | Available balance, unpaid amount, cash/gift balance/credit limit; estimate fields are used only for cross-checking |
+| P0 | Daily estimate | `GET /billing-api/v2/bill/snapshot?date=...` | Query after 08:00; covers 00:00 on the first day of the current month through 00:00 on the query date, excluding the query date |
+| P0 | Resource packs | `GET /billing-api/v1/respack/month-overview` | Total available, used, and remaining this month; maximum page size 200 |
+| P0 | Final monthly bill | `GET /billing-api/v2/bill/detail?start=...&end=...` | Use top-level `total_money`; read the previous month on or after the fifth day of each month |
 
-金额字段为保留 8 位小数的定点整数，导出前除以 `100000000`。币种可能为 CNY 或 USD，所以指标名不硬编码 `_yuan`，通过受控 `currency` label 表示币种，HELP 文本明确值为该币种的主单位。
+Money fields are fixed-point integers with eight decimal places and must be divided by `100000000` before export. The currency can be CNY or USD, so metric names do not hard-code `_yuan`. A controlled `currency` label represents the currency, and HELP text makes clear that values are expressed in that currency's major unit.
 
-`bill/overview` 返回账单/订单条目，不提供可靠的顶层月总额；最近已结算总额必须使用 `bill/detail` 的 `total_money`。余额接口字段表写 `available_balance`，响应示例却写 `balance`，DTO 需要兼容两者并在同时出现且不一致时报错。
+`bill/overview` returns bill/order entries and does not provide a reliable top-level monthly total. The most recently finalized total must use `bill/detail`'s `total_money`. The balance API field table uses `available_balance`, while its response example uses `balance`. The DTO must accept either field and report an error if both are present with different values.
 
-### 7.2 P0 指标
+### 7.2 P0 Metrics
 
-| 指标 | 类型 | Labels | 语义 |
+| Metric | Type | Labels | Semantics |
 |---|---|---|---|
-| `qiniu_billing_available_balance` | Gauge | `currency` | 当前可用额度，币种主单位 |
-| `qiniu_billing_unpaid_amount` | Gauge | `currency` | 当前未支付金额 |
-| `qiniu_billing_estimated_cost` | Gauge | `currency` | `bill/snapshot.total_money` 对应账期的累计预估费用；不强称 MTD |
-| `qiniu_billing_estimate_period_start_timestamp_seconds` | Gauge | 无 | 每日预估覆盖账期的起始时间 |
-| `qiniu_billing_estimate_period_end_timestamp_seconds` | Gauge | 无 | 每日预估覆盖账期的结束时间（开区间） |
-| `qiniu_billing_resource_pack_records` | Gauge | 无 | 完整分页结果中的资源包月概览记录数；0 可用于 absence 告警 |
-| `qiniu_billing_resource_pack_total` | Gauge | `item,zone,available_time,unit` | 本月可用总量，禁止跨 unit 聚合 |
-| `qiniu_billing_resource_pack_used` | Gauge | `item,zone,available_time,unit` | 本月已用量 |
-| `qiniu_billing_resource_pack_remaining` | Gauge | `item,zone,available_time,unit` | 本月剩余量 |
-| `qiniu_billing_resource_pack_remaining_ratio` | Gauge | `item,zone,available_time,unit` | `month_remain / total_surplus`，范围 0～1；无记录时不导出 |
-| `qiniu_billing_last_finalized_cost` | Gauge | `currency` | 最近已完整结算月份总费用 |
-| `qiniu_billing_last_finalized_period_start_timestamp_seconds` | Gauge | 无 | 最近已结算月份起始时间 |
+| `qiniu_billing_available_balance` | Gauge | `currency` | Current available balance in the currency's major unit |
+| `qiniu_billing_unpaid_amount` | Gauge | `currency` | Current unpaid amount |
+| `qiniu_billing_estimated_cost` | Gauge | `currency` | Cumulative estimated cost for the period represented by `bill/snapshot.total_money`; do not assert that it is MTD |
+| `qiniu_billing_estimate_period_start_timestamp_seconds` | Gauge | None | Start of the period covered by the daily estimate |
+| `qiniu_billing_estimate_period_end_timestamp_seconds` | Gauge | None | End of the period covered by the daily estimate (exclusive) |
+| `qiniu_billing_resource_pack_records` | Gauge | None | Number of resource-pack monthly-overview records in the complete paginated result; 0 may be used for absence alerts |
+| `qiniu_billing_resource_pack_total` | Gauge | `item,zone,available_time,unit` | Total available this month; aggregation across units is forbidden |
+| `qiniu_billing_resource_pack_used` | Gauge | `item,zone,available_time,unit` | Amount used this month |
+| `qiniu_billing_resource_pack_remaining` | Gauge | `item,zone,available_time,unit` | Amount remaining this month |
+| `qiniu_billing_resource_pack_remaining_ratio` | Gauge | `item,zone,available_time,unit` | `month_remain / total_surplus`, range 0-1; absent when there are no records |
+| `qiniu_billing_last_finalized_cost` | Gauge | `currency` | Total cost for the most recently fully finalized month |
+| `qiniu_billing_last_finalized_period_start_timestamp_seconds` | Gauge | None | Start of the most recently finalized month |
 
-每月 1 日的 snapshot 代表上月整月，而非当月 MTD；因此预估指标使用中性名称并同时暴露 period start/end。不要将 `bill_id`、`order_hash`、`po_id`、email、月份字符串或任意分账标签作为 label。
+A snapshot queried on the first day of a month represents the entire previous month, not current-month MTD. The estimate metric therefore uses a neutral name and exposes period start/end separately. Do not use `bill_id`, `order_hash`, `po_id`, email, month strings, or any cost-allocation label as a label.
 
-资源包原始用量存在 GB、千次、分钟等混合单位，所以保留受控 `unit` label，并在规则和看板中禁止跨单位求和。`item/zone/available_time/unit` 必须与配置中的四元组静态 allowlist 精确匹配；allowlist 为空时不调用资源包接口，也不导出对应指标。资源包分页必须全有或全无：任一页失败或出现未配置标签时不发布部分结果；完整成功但列表为空时原子清空旧资源包快照并导出 `records=0`。MVP 最多读取 50 页（每页 200 条），达到上限仍未结束则整轮失败，防止异常分页造成无界调用。币种仅接受官方文档列出的 `CNY`、`USD`。
+Raw resource-pack usage mixes units such as GB, thousands of requests, and minutes. Preserve a controlled `unit` label and forbid summing across units in rules and dashboards. `item/zone/available_time/unit` must exactly match a static tuple allowlist in the configuration. When the allowlist is empty, do not call the resource-pack API or export the corresponding metrics. Resource-pack pagination is all-or-nothing: if any page fails or contains an unconfigured label, do not publish partial results. If a complete successful result is empty, atomically clear the old resource-pack snapshot and export `records=0`. The MVP reads at most 50 pages of 200 records each. If pagination has not ended at that limit, fail the entire round to prevent anomalous pagination from causing unbounded calls. Accept only the officially documented currencies, `CNY` and `USD`.
 
-## 8. Exporter 自监控指标
+## 8. Exporter Self-monitoring Metrics
 
-| 指标 | 类型 | Labels | 语义 |
+| Metric | Type | Labels | Semantics |
 |---|---|---|---|
-| `qiniu_exporter_build_info` | Gauge=1 | `version,revision,goversion` | 构建信息 |
-| `qiniu_exporter_collector_success` | Gauge | `module,collector` | 单任务最近一次或所有配置资源各自最近一次轮询都成功时为 1 |
-| `qiniu_exporter_collector_last_success_timestamp_seconds` | Gauge | `module,collector` | 单任务最近成功时间；资源型任务取各资源最近成功时间的最旧值 |
-| `qiniu_exporter_collector_stale_after_seconds` | Gauge | `module,collector` | 该已启用 collector 配置的数据最大保鲜时长；用于告警阈值 |
-| `qiniu_exporter_data_timestamp_seconds` | Gauge | `module,collector` | 当前快照对应的上游数据有效时间；上游未提供数据时间时不导出 |
-| `qiniu_exporter_collection_duration_seconds` | Gauge | `module,collector` | 最近一次轮询耗时 |
-| `qiniu_exporter_api_requests_total` | Counter | `service,endpoint,result` | exporter 生命周期内上游调用次数；endpoint/result 为受控枚举 |
-| `qiniu_exporter_api_request_duration_seconds` | Histogram | `service,endpoint` | 上游 API 调用时延 |
-| `qiniu_exporter_api_rate_limit_events_total` | Counter | `service,host` | 429/403024 触发次数 |
-| `qiniu_exporter_api_limiter_wait_duration_seconds` | Histogram | `service,host` | 获取本地限流 token 的等待时长 |
-| `qiniu_exporter_scheduler_skipped_total` | Counter | `module,collector,reason` | 因安全门禁或任务超周期而跳过/延后的次数 |
-| `qiniu_exporter_resource_collector_success` | Gauge | `module,collector,resource` | 逐 bucket/domain 最近一次轮询是否成功 |
-| `qiniu_exporter_resource_last_success_timestamp_seconds` | Gauge | `module,collector,resource` | 逐资源最近成功时间 |
-| `qiniu_exporter_resource_data_timestamp_seconds` | Gauge | `module,collector,resource` | 逐资源上游数据有效时间；未知时不导出 |
+| `qiniu_exporter_build_info` | Gauge | `version,revision,goversion` | Build information with a constant value of 1 |
+| `qiniu_exporter_collector_success` | Gauge | `module,collector` | 1 when the latest poll of a single task succeeded, or when the latest poll for every configured resource succeeded |
+| `qiniu_exporter_collector_last_success_timestamp_seconds` | Gauge | `module,collector` | Latest successful time for a single task; for resource-oriented tasks, the oldest latest-success time across resources |
+| `qiniu_exporter_collector_stale_after_seconds` | Gauge | `module,collector` | Maximum freshness duration configured for this enabled collector; used as an alert threshold |
+| `qiniu_exporter_data_timestamp_seconds` | Gauge | `module,collector` | Effective upstream data time represented by the current snapshot; absent when upstream does not provide a data time |
+| `qiniu_exporter_collection_duration_seconds` | Gauge | `module,collector` | Duration of the latest poll |
+| `qiniu_exporter_api_requests_total` | Counter | `service,endpoint,result` | Number of upstream calls over the exporter lifetime; `endpoint` and `result` are controlled enums |
+| `qiniu_exporter_api_request_duration_seconds` | Histogram | `service,endpoint` | Upstream API call latency |
+| `qiniu_exporter_api_rate_limit_events_total` | Counter | `service,host` | Number of 429/403024 events |
+| `qiniu_exporter_api_limiter_wait_duration_seconds` | Histogram | `service,host` | Time spent waiting for a local limiter token |
+| `qiniu_exporter_scheduler_skipped_total` | Counter | `module,collector,reason` | Scheduling-skip events. A disabled verification gate records one startup event because no recurring task is registered; an `overlap` event is recorded when a completed run consumes or exceeds its interval. |
+| `qiniu_exporter_resource_collector_success` | Gauge | `module,collector,resource` | Whether the latest per-bucket/domain poll succeeded |
+| `qiniu_exporter_resource_last_success_timestamp_seconds` | Gauge | `module,collector,resource` | Latest per-resource success time |
+| `qiniu_exporter_resource_data_timestamp_seconds` | Gauge | `module,collector,resource` | Effective upstream data time per resource; absent when unknown |
 
-`result` 只允许 `success`、`api_error`、`rate_limited`、`http_4xx`、`http_5xx`、`transport_error`、`decode_error` 等有限枚举，不使用原始错误文本。先校验 HTTP 状态，再校验 JSON envelope；例如财务 HTTP 200 但 `code != 0` 必须归类为 `api_error` 并令本轮失败。上游数据时间已知时，用 `time() - qiniu_exporter_data_timestamp_seconds > qiniu_exporter_collector_stale_after_seconds` 判断业务数据是否过期；未知时对 `collector_last_success_timestamp_seconds` 使用同一配置阈值，无需导出重复的 age 指标。
+`result` permits only a bounded set such as `success`, `api_error`, `rate_limited`, `http_4xx`, `http_5xx`, `transport_error`, and `decode_error`; never use raw error text. Validate the HTTP status first, then the JSON envelope. For example, a billing response with HTTP 200 but `code != 0` must be classified as `api_error` and fail that round. When the upstream data time is known, use `time() - qiniu_exporter_data_timestamp_seconds > qiniu_exporter_collector_stale_after_seconds` to detect stale business data. When it is unknown, apply the same configured threshold to `collector_last_success_timestamp_seconds`; no duplicate age metric is needed.
 
-dataset 级 `collector_success` 只有在所有配置资源的最近一次轮询均成功时才为 1；资源型 collector 的 `collector_last_success_timestamp_seconds` 取各配置资源最近成功时间的最旧值，不能因某一个健康资源持续成功而滚动前移。逐资源失败由 resource 指标定位。dataset 级 `data_timestamp` 取当前资源快照中最旧的已知上游时间，逐资源告警则使用 resource data timestamp。只有实际启用的 collector 才导出 `collector_stale_after_seconds`，因此禁用功能不会被通用新鲜度规则误报。
+Dataset-level `collector_success` is 1 only when the latest poll succeeded for every configured resource. For a resource-oriented collector, `collector_last_success_timestamp_seconds` is the oldest latest-success time among all configured resources; it must not advance merely because one healthy resource continues to succeed. Resource metrics identify individual failures. Dataset-level `data_timestamp` is the oldest known upstream time among the current resource snapshots; per-resource alerts use the resource data timestamp. Only enabled collectors export `collector_stale_after_seconds`, preventing generic freshness rules from alerting on disabled features.
 
-## 9. 标签与基数规则
+## 9. Label and Cardinality Rules
 
-允许的业务 label：
+Permitted business labels:
 
-- Kodo：`bucket`、`region`、`storage_class`、有限枚举的 operation/route。
-- CDN：`domain`、`region`、API 返回并经过格式校验的状态码键。
-- 财务：`currency`，以及经过 allowlist 的 `item`、`zone`、`available_time`、`unit`。
+- Kodo: `bucket`, `region`, `storage_class`, and bounded operation/route enums.
+- CDN: `domain`, `region`, and format-validated status-code keys returned by the API.
+- Billing: `currency` and allowlisted `item`, `zone`, `available_time`, and `unit` values.
 
-资源包 allowlist 最多 200 个四元组，对应最多约 800 条明细业务 series；需要更多时应拆分 exporter/监控范围并先评估 Prometheus 基数，而不是放宽无界上限。CDN 状态码响应不得在同一类别同时出现聚合键和精确键（例如 `5xx` 与 `500`），避免规则重复计数。
+The resource-pack allowlist contains at most 200 tuples, producing at most about 800 detailed business time series. If more are needed, split the exporter or monitoring scope and evaluate Prometheus cardinality first instead of relaxing the bounded limit. A CDN status-code response must not contain both an aggregate key and an exact key from the same class, such as `5xx` and `500`, because rules could double-count them.
 
-禁止的 label：AK/SK、UID/email、account_id、object key、完整 URL、客户端 IP、User-Agent、Referer、CNAME、task ID、order/bill/po ID、时间戳字符串、任意未受控 bucket tag。
+Forbidden labels: AK/SK, UID/email, `account_id`, object key, complete URL, client IP, User-Agent, Referer, CNAME, task ID, order/bill/PO ID, timestamp string, or any uncontrolled bucket tag.
 
-首版不在每个指标上添加 `account` label。单账号 exporter 的账号别名应由 Prometheus scrape 配置作为 target label 注入，例如 `qiniu_account="production"`。这符合“所有指标共有的维度属于目标标签”的 Prometheus 约定，也避免 exporter 内部重复维护。
+The initial release does not add an `account` label to every metric. Under the one-account-per-process deployment requirement, Prometheus scrape configuration should inject that account's alias as a target label, for example `qiniu_account="production"`. This follows the Prometheus convention that dimensions common to all metrics belong in target labels and avoids duplicated state inside the exporter.
 
-## 10. 调度、限流与调用预算
+## 10. Scheduling, Rate Limits, and Call Budgets
 
-### 10.1 两级限流
+### 10.1 Layered Rate Limiting
 
-所有请求都经过分层 limiter。第一层按 `account + 实际 hostname` 限制账号对该 host 的总速率，第二层按 endpoint class 进一步收紧未知配额接口；另有只作用于 attempt 0 的正常采集预算。主账号和子账号共享 CDN 配额，因此不能按 credential 各建一套令牌桶。
+All requests pass through layered limiters. The first layer limits the account's aggregate rate to the actual hostname, and the second layer further restricts endpoint classes with unknown quotas. A separate normal-collection budget applies only to attempt 0. A primary account and its subaccounts share the CDN quota, so they must not receive independent token buckets per credential.
 
-| Quota group | 硬上限 | 首请求预算 | 重试预算 | Burst | 最大并发 | 依据 |
+| Quota group | Hard limit | First-attempt budget | Retry budget | Burst | Maximum concurrency | Basis |
 |---|---:|---:|---:|---:|---:|---|
-| `qiniu-api-shared` (`api.qiniu.com`) | 10 QPS | 8 QPS | 2 QPS | 1 | 4 | 账号对该 Host 的官方上限；当前仅财务请求经过 |
-| `cdn-fusion` (`fusion.qiniuapi.com`) | 5 QPS | 4 QPS | 1 QPS | 1 | 4 | 官方为 5～10 QPS，取下限 |
-| `kodo-stats` (`api.qiniuapi.com`) | 1 QPS | 0.8 QPS | 0.2 QPS | 1 | 1 | 本地保护值，官方未公布 |
-| `billing` (`api.qiniu.com`) | 1 QPS | 0.8 QPS | 0.2 QPS | 1 | 1 | endpoint 子限流；本地保护值，官方未公布 |
+| `qiniu-api-shared` (`api.qiniu.com`) | 10 QPS | 8 QPS | 2 QPS | 1 | 4 | Official per-account limit for this Host; currently only billing requests use it |
+| `cdn-fusion` (`fusion.qiniuapi.com`) | 5 QPS | 4 QPS | 1 QPS | 1 | 4 | Official range is 5-10 QPS; use its lower bound |
+| `kodo-stats` (`api.qiniuapi.com`) | 1 QPS | 0.8 QPS | 0.2 QPS | 1 | 1 | Local safety limit; the official limit is unpublished |
+| `billing` (`api.qiniu.com`) | 1 QPS | 0.8 QPS | 0.2 QPS | 1 | 1 | Endpoint sub-limit; local safety limit because the official limit is unpublished |
 
-正常采集请求通过 attempt-0 limiter，最多使用有效硬上限的 80%；重试通过独立 limiter，最多使用有效硬上限的 20%。有效硬上限是请求路径上所有 Host/endpoint 上限的最小值；例如 Billing 取 `min(qiniu_api_host_max_qps, billing_max_qps)`。两类请求仍必须获取每层硬 limiter 的 token，因此组合流量永远不能突破任一硬上限。分页和错误隔离属于新的正常请求，也要获取 attempt-0 与硬 limiter，不能走旁路；CDN 隔离另有单轮 16 batch attempt 上限。调低 `first_request_utilization` 不会扩大重试预算。上述 limiter 是进程内的；若要给同账号的其他程序留出容量，必须继续下调本 exporter 的硬上限，多实例则需使用共享的外部分布式 limiter。配置只能把代码内的保护上限调低，不支持本地 override。
+Normal collection requests pass through the attempt-0 limiter and may use at most 80% of the effective hard limit. Retries pass through a separate limiter and may use at most 20% of the effective hard limit. The effective hard limit is the minimum of all Host and endpoint limits on the request path; for example, Billing uses `min(qiniu_api_host_max_qps, billing_max_qps)`. Both request classes must still acquire a token from every hard limiter, so their combined traffic can never exceed any hard limit. Pagination and error-isolation calls are new normal requests and must acquire both attempt-0 and hard-limiter tokens; they cannot bypass them. CDN isolation additionally has a per-round limit of 16 batch attempts. Lowering `first_request_utilization` does not increase the retry budget. These limiters are process-local. To reserve capacity for other programs using the same account, reduce this exporter's hard limits further. Multiple exporter instances require a shared external distributed limiter. Configured limits may lower the protection ceilings built into the code; raising those ceilings is unsupported.
 
-### 10.2 摊平调度、批处理与缓存
+### 10.2 Smoothed Scheduling, Batching, and Caching
 
-- 每个 `dataset + resource` 使用稳定 phase（资源名 hash 对周期取模）分布到整个周期，不在每个 5 分钟边界集中扇出；仅增加小幅随机抖动。
-- 每个任务由单一串行循环执行，上一轮未结束时不会叠加同任务请求，也不存在无界待处理队列。稳定 phase、独立 context deadline 和分层 limiter 共同控制竞争；MVP 不实现会引入额外状态的中央优先级队列。
-- CDN monitoring bandwidth/flow 每批最多 50 个域名。Analytics 响应没有 domain 维度时只能单域名查询，不能把聚合值错误拆回各域名。
-- Kodo `/v6/*` 不按 bucket 返回分组，逐 bucket 指标必然扇出；只查询显式 allowlist 和实际启用的 storage class。
-- 查询窗口只覆盖选择最新完整点所需的最小范围（CDN 只有日期粒度的查询参数时覆盖当天）；冷启动不扫描历史。相同 `dataset + resource` 只有一个调度任务，上一轮未完成时不再发起同窗口请求。
-- `/metrics` 永不访问上游。Kodo/CDN 实时结果缓存至下一轮，余额缓存 1 小时，daily/finalized 财务结果缓存到下一安全账期。
-- `400032` 无效域名负缓存到配置变更或进程重启，避免每轮重复打坏域名；同时持续暴露该资源的采集失败状态。
+- Use a stable phase for every `dataset + resource` by hashing the resource name modulo the interval, spreading work across the entire interval instead of fanning out at every five-minute boundary. Add only a small random jitter.
+- Each task runs in one serial loop. A new run of the same task cannot overlap a previous run, and there is no unbounded pending queue. Stable phases, independent context deadlines, and layered limiters jointly control contention. The MVP does not implement a central priority queue that would introduce additional state.
+- CDN monitoring bandwidth/flow batches contain at most 50 domains. When an analytics response has no domain dimension, query one domain at a time; never incorrectly distribute an aggregate back across individual domains.
+- Kodo `/v6/*` responses are not grouped by bucket, so per-bucket metrics necessarily fan out. Query only the explicit allowlist and storage classes that are actually enabled.
+- Query windows cover only the minimum range required to select the latest complete point. When CDN query parameters support only date granularity, cover the current day. Do not scan history during cold start. There is only one scheduled task for a given `dataset + resource`; do not issue another request for the same window while the previous run is incomplete.
+- `/metrics` never accesses upstream services. Poll Kodo/CDN, balance, and daily/finalized billing data on their documented schedules. Successful snapshots survive failed rounds and remain exportable only until their configured `stale_after` duration expires.
+- Negative-cache invalid `400032` domains until a configuration change or process restart so they are not retried every round. Continue exposing collection failure for each affected resource.
 
-### 10.3 推荐周期与冷启动
+### 10.3 Recommended Intervals and Cold Start
 
-| Dataset | 周期 | 冷启动行为 |
+| Dataset | Interval | Cold-start behavior |
 |---|---|---|
-| Kodo 容量/对象数 | 15 分钟 | 在第一个完整周期内按 resource phase 铺开 |
-| Kodo GET/PUT/出网 | 5 分钟 | 在第一个完整周期内铺开，只读取最新安全桶 |
-| CDN monitoring/analytics | 5 分钟 | 在第一个完整周期内按 domain 铺开 |
-| 财务余额 | 60 分钟 | 启动后立即采集 |
-| 财务预估/资源包 | 每日 08:15 后 | 08:15 后启动立即补采；此前使用最近安全日期，每月 1 日早晨等待 08:15 |
-| 最终月账单 | 每月 5 日起每日一次，成功即停 | 启动立即寻找最近完整月；1～4 日通常取上上月，5 日后取上月 |
+| Kodo capacity/object count | 15 minutes | Spread by resource phase across the first complete interval |
+| Kodo GET/PUT/egress | 5 minutes | Spread across the first complete interval and read only the latest safe bucket |
+| CDN monitoring/analytics | 5 minutes | Spread by domain across the first complete interval |
+| Billing balance | 60 minutes | Collect immediately after startup |
+| Billing estimate | Daily at 08:15 | Run at startup when a safe snapshot date exists; on the morning of the first day of each month, wait until 08:15 |
+| Billing resource packs | Daily at 08:16 | Register only when the allowlist is nonempty; run at startup only after 08:15 |
+| Final monthly bill | Daily at 08:30 | Query immediately at startup; select the month before last on days 1-4 and the previous month from day 5 onward; later runs are no-ops after success until the selected period changes |
 
-固定间隔任务在首次稳定 phase 后增加约 ±10% 随机抖动。官方要求每日预估在 08:00 后查询；exporter 留出安全余量，固定从 08:15 开始，资源包从 08:16 开始。启动判定由调度器在计算首次 delay 的同一时刻执行，避免跨 08:15 的竞态。资源包分页任一页失败时整轮失败；只有全部页面成功后才能原子发布。
+After the initial stable phase, fixed-interval tasks add approximately +/-10% random jitter. The official requirement is to query daily estimates after 08:00; the exporter adds a safety margin and starts at 08:15, while resource-pack collection starts at 08:16. The scheduler evaluates startup eligibility at the same instant it calculates the first delay, avoiding a race across 08:15. If any resource-pack page fails, the entire round fails; publish atomically only after all pages succeed.
 
-### 10.4 启动调用预算准入
+### 10.4 Startup Call-budget Admission
 
-启动时必须根据配置计算需求并做 admission，不能只记录平均 QPS 后继续超额运行：
+At startup, calculate demand from configuration and perform admission control. Do not merely log average QPS and continue with an excessive workload:
 
-- Kodo 首请求速率约为 `B × (4/300 + 2×S/900)` QPS；`B` 为 bucket 数，`S` 为启用存储类型数。`S=6`、本地硬上限 1 QPS、80% 首请求预算时，逐 bucket 模式约最多容纳 29 个 bucket。时区门禁未通过时不发请求，也不计 admission。
-- CDN fusion 首请求速率约为 `[2×ceil(D/50) + 3×D] / 300` QPS；`D` 为 domain 数。异常隔离不计入稳定态 admission，但受同一 attempt-0 limiter 和单轮 16 batch attempt 上限约束。`monitoring_units_verified=false` 时不调用两个 monitoring 接口，准入计算临时去掉前一项；时区门禁未通过时不发任何 CDN 请求。
-- 财务稳定态调用量很低；余额、每日接口和完整分页仍受 1 QPS、burst 1、单并发约束，资源包 allowlist 为空时不发起分页。
+- The approximate Kodo first-attempt rate is `B × (4/300 + 2×S/900)` QPS, where `B` is the number of buckets and `S` is the number of enabled storage classes. With `S=6`, a local hard limit of 1 QPS, and an 80% first-attempt budget, per-bucket mode admits up to 30 buckets. Do not send requests or include them in admission calculations until the timezone gate passes.
+- The approximate CDN fusion first-attempt rate is `[2×ceil(D/50) + 3×D] / 300` QPS, where `D` is the number of domains. Error isolation is excluded from steady-state admission but remains subject to the same attempt-0 limiter and the per-round limit of 16 batch attempts. When `monitoring_units_verified=false`, do not call the two monitoring endpoints and temporarily omit the first term from admission calculations. Do not send any CDN request until the timezone gate passes.
+- Steady-state billing call volume is low. Balance, daily APIs, and complete pagination remain subject to 1 QPS, burst 1, and concurrency 1. Do not paginate when the resource-pack allowlist is empty.
 
-预计需求超过 80% 首请求预算时，该 collector 拒绝启动并输出明确配置错误。处理顺序是：收紧 allowlist、只保留 P0、延长容量周期、改用账号/region 聚合语义，最后再向七牛申请配额。不能靠同账号多实例扩容；若必须多实例，需共享外部分布式 limiter，所有实例总预算仍不得超过账号配额。
+If estimated demand exceeds the 80% first-attempt budget, reject startup for that collector with an explicit configuration error. With the current configuration surface, resolve this by shrinking bucket, domain, or storage-class allowlists, or by disabling an unneeded module. Supporting different intervals, aggregate semantics, or higher protection ceilings requires a reviewed code change and, where applicable, a higher Qiniu quota. Do not scale horizontally with multiple instances for the same account. If multiple instances are unavoidable, use a shared external distributed limiter and keep their aggregate budget within the account quota.
 
-### 10.5 退避与自适应降速
+### 10.5 Backoff and Adaptive Slowdown
 
-- 只对 transport error、429、`403024` 和 5xx 重试，最多 2 次；普通 4xx 不重试。优先遵循 `Retry-After`，否则两次重试分别使用不超过 1 秒、2 秒的 full-jitter 退避。
-- 任一 429/`403024` 触发该 `account + host` 至少 5 秒 cooldown，并将有效速率减半；连续 5 分钟没有再限流后再逐步恢复，不能每个请求各自盲目重试。
-- HTTP 200 但业务 `code != 0` 默认不重试；只有明确列入瞬时错误 allowlist 的业务码可重试。
-- `400032` 不做普通重试：批量请求直接做有上限的二分隔离并负缓存坏域名，防止最坏情况无限放大请求。
-- 统计 POST 是只读查询，可在完整重建 body、日期头和签名后重试。单轮总超时必须小于 dataset 周期。
-- 日志可记录 `X-Reqid`、service、endpoint 和错误类别，但不得记录 Authorization、AK/SK 或完整响应体中的账号信息。
+- Retry only transport errors, 429, `403024`, and 5xx, with at most two retries. Do not retry ordinary 4xx responses. Always use full-jitter backoff capped at 1 second for the first retry and 2 seconds for the second. A valid `Retry-After` additionally extends the shared limiter cooldown beyond its five-second minimum.
+- Any 429/`403024` triggers a cooldown of at least 5 seconds for the `account + host` and halves the effective rate. Recover gradually only after five consecutive minutes without another rate-limit response; individual requests must not retry blindly in isolation.
+- Do not retry an HTTP 200 response whose business `code != 0`, except for the recognized `403024` rate-limit code, which follows the shared cooldown and bounded retry path.
+- Do not retry `400032` normally. Apply bounded binary isolation to the batch request and negative-cache invalid domains to prevent unbounded worst-case request amplification.
+- Statistics POST requests are read-only queries and may be retried after fully rebuilding the body, date header, and signature. The total timeout for one round must be shorter than the dataset interval.
+- Logs may record `X-Reqid`, service, endpoint, and error category, but must not record Authorization, AK/SK, or account information from full response bodies.
 
-## 11. 数据转换与异常语义
+## 11. Data Conversion and Error Semantics
 
-- 使用响应时间数组选择“最新完整且超过安全滞后”的点，不直接取数组最后一个元素。
-- 速率换算按请求的名义 granularity；必须校验时间对齐和连续性，缺桶不跨洞摊薄。
-- 严格校验时间数组和数据数组长度、单调时间、非负容量/数量、有限浮点值及受控枚举。
-- 上游明确返回 0 才导出 0；缺数据、解码失败、数组错位时不伪造 0。
-- 同一原子快照涉及多个 endpoint 时，所选 `BucketEnd/DataAt` 必须完全一致；不一致时保留旧快照并令本轮失败，不能用最旧时间掩盖混合时间桶。
-- 比例分母为 0 时该样本不导出；资源包明确“总可用=0 且剩余=0”可按耗尽语义导出 0，但需记录测试用例。
-- 所有上游历史时间桶业务值均为 Gauge。Prometheus scrape 时间表示观察时间，`qiniu_exporter_data_timestamp_seconds` 才表示业务数据时间。
-- `last_success_timestamp` 是 exporter 获取时间，不能冒充上游 `data_timestamp`。业务快照以 `CollectedAt` 与已知 `DataAt` 中较早者计算 `stale_after`；即使 API 请求持续成功，冻结的旧上游桶也会停止导出。告警规则必须同时检查 collector success/last success。
-- 启用 Kodo/CDN 时，`stale_after.realtime` 至少为 `source_lag + 5m`，否则启动失败，避免刚采到的完整桶立即被判为过期。
-- 财务定点整数先用整数/decimal 安全转换，再转 `float64` 暴露；禁止先转浮点再除导致不必要的精度损失。
+- Use response timestamp arrays to select the latest point that is both complete and older than the safety lag; do not simply take the last array element.
+- Convert rates using the nominal granularity requested. Validate timestamp alignment and continuity; do not average across gaps caused by missing buckets.
+- Strictly validate timestamp-array and data-array lengths, monotonically increasing timestamps, nonnegative capacity/count values, finite floating-point values, and controlled enums.
+- Export 0 only when upstream explicitly returns 0. Do not fabricate 0 for missing data, decode failures, or misaligned arrays.
+- When one atomic snapshot depends on multiple endpoints, the selected `BucketEnd/DataAt` values must match exactly. If they differ, retain the old snapshot and fail the current round; do not hide mixed time buckets by choosing the oldest timestamp.
+- Do not export cache-ratio samples when their denominator is 0. For a resource pack whose `total_surplus` is 0, export a remaining ratio of 0 to represent an exhausted or zero allocation.
+- All upstream business values for historical time buckets are Gauges. Prometheus scrape time represents observation time; `qiniu_exporter_data_timestamp_seconds` represents business-data time.
+- `last_success_timestamp` is the time at which the exporter obtained the data and must not masquerade as upstream `data_timestamp`. Calculate `stale_after` for a business snapshot from the earlier of `CollectedAt` and a known `DataAt`. Even if API requests continue to succeed, stop exporting a frozen old upstream bucket. Alert rules must check both collector success and last success.
+- When Kodo or CDN is enabled and its statistics-timezone gate is verified, `stale_after.realtime` must be at least `source_lag + 5m` or startup fails, preventing a newly collected complete bucket from immediately being considered stale.
+- Safely convert fixed-point billing integers using integer/decimal arithmetic before converting to `float64` for export. Do not convert to floating point before division and introduce avoidable precision loss.
 
-## 12. 权限与密钥
+## 12. Permissions and Secrets
 
-### 12.1 最小权限
+### 12.1 Least Privilege
 
-Kodo 官方 IAM action：
+Official Kodo IAM action:
 
-- `kodo/statistics`：读取计量统计。
+- `kodo/statistics`: read usage statistics.
 
-`kodo/statistics` 是资源级 action；按 bucket 授权时使用对应 bucket QRN。省略 bucket 做账号聚合统计通常需要 `*`/全 bucket 资源授权，必须在测试账号验证。
+`kodo/statistics` is a resource-level action. When authorizing by bucket, use the corresponding bucket QRN. Omitting the bucket for account-wide aggregate statistics generally requires `*`/all-bucket resource authorization and must be verified with a test account.
 
-CDN P0 建议 action：
+Recommended CDN P0 actions:
 
 - `cdn/GetBandwidthAndFlux`
 - `cdn/GetReqCount`
 - `cdn/GetStateCode`
 - `cdn/GetHitRate`
 
-域名资源权限按实际 allowlist 收紧；统计类 action 中部分是服务级。禁止授予 `CreateDomain`、`DeleteDomain`、`OnlineDomain`、`OfflineDomain`、`Update*`、`Refresh`、`Prefetch`。参考 [CDN IAM Actions](https://developer.qiniu.com/af/12493/cdn-actions)。
+These four statistics actions are service-level and cannot be scoped to individual domains through IAM. The exporter's static domain allowlist is therefore the operational scope boundary. Do not grant `CreateDomain`, `DeleteDomain`, `OnlineDomain`, `OfflineDomain`, `Update*`, `Refresh`, or `Prefetch`. See [CDN IAM Actions](https://developer.qiniu.com/af/12493/cdn-actions).
 
-财务公开文档没有提供 Billing/Financial IAM action。实施前必须验证 IAM Key 能否访问；如果只能使用主账号 AK/SK：
+Public billing documentation does not provide Billing/Financial IAM actions. Before enabling Billing, verify whether an IAM key can access these APIs. If only a primary-account AK/SK works:
 
-- 财务 client 只允许设计中列出的固定 GET 路径，代码中不实现订单取消等写 API。
-- 单实例内 Kodo、CDN、Billing 统一引用 `main` credential；启用 Billing 时该凭据必须属于具有财务权限的管理员账号。
-- 普通子用户凭据部署时关闭 Billing。高安全环境将 Billing 模块部署为单独 exporter 实例，并在该实例中继续使用标准 `QINIU_ACCESS_KEY`、`QINIU_SECRET_KEY` 注入管理员凭据。
-- 通过网络策略限制实例只能访问七牛 API 和被 Prometheus 抓取。
+- The billing client permits only the fixed GET paths listed in this design; the code does not implement write APIs such as order cancellation.
+- The bundled configuration uses the `main` credential for Kodo, CDN, and Billing. Named credentials are supported, but all credentials selected within one exporter instance must belong to the same account. When Billing is enabled, its selected credential must belong to an administrator account with billing permissions.
+- Disable Billing in deployments that use ordinary subaccount credentials. In high-security environments, deploy the Billing module as a separate exporter instance and continue injecting administrator credentials through the standard `QINIU_ACCESS_KEY` and `QINIU_SECRET_KEY` variables in that instance.
+- Use network policy to restrict the instance to reaching only the Qiniu APIs and being scraped by Prometheus.
 
-### 12.2 Secret 注入
+### 12.2 Secret Injection
 
-- 配置文件只保存环境变量名或 Secret 文件路径，不保存 AK/SK 明文。
-- 支持 `access_key_env`、`secret_key_env` 或 `*_file`；禁止通过 CLI flag 传 secret，避免进入进程列表。
-- 配置 dump、错误日志、pprof 和指标不得出现凭证。
-- SDK debug 日志默认关闭。
+- Configuration files store only environment-variable names or Secret file paths, never plaintext AK/SK values.
+- For each credential, configure exactly one of `access_key_env` or `access_key_file`, and exactly one of `secret_key_env` or `secret_key_file`. Do not pass secrets via CLI flags, which expose them in process listings.
+- Configuration dumps, error logs, pprof, and metrics must not contain credentials.
+- SDK debug logging is disabled by default.
 
-## 13. 建议配置形态
+## 13. Configuration Shape
 
-以下仅定义配置意图，不是最终字段承诺：
+The implemented configuration uses the following shape:
 
 ```yaml
 server:
@@ -399,9 +402,9 @@ billing:
   credential: main
   timezone: Asia/Shanghai
   resource_pack_allowlist:
-    - item: CDN加速通用计费项
-      zone: 中国大陆
-      available_time: 全时段
+    - item: "<exact-item-name-from-Qiniu>"
+      zone: "<exact-zone-name-from-Qiniu>"
+      available_time: "<exact-availability-name-from-Qiniu>"
       unit: GB
 
 collection:
@@ -422,74 +425,78 @@ collection:
   billing_max_concurrency: 1
 ```
 
-## 14. 代码结构建议
+## 14. Code Structure
 
 ```text
-cmd/qiniu-exporter/        进程入口、flag、生命周期
-internal/config/           配置解析、校验、secret 引用
-internal/authhttp/         可重签名 HTTP client、固定 endpoint policy
-internal/limiter/          Host/endpoint 两级限流与自适应降速
-internal/qiniu/kodo/       /v6 统计 DTO/client
-internal/qiniu/cdn/        monitoring、analytics DTO/client
-internal/qiniu/billing/    固定只读 GET client、金额转换
-internal/poller/           调度、抖动、限流、重试
-internal/snapshot/         不可变 dataset 快照与原子发布
-internal/collector/        Prometheus 描述符和 Collect
-internal/telemetry/        exporter 自监控指标
-internal/app/              三模块任务注册与快照发布
+cmd/qiniu-exporter/        Process entry point, flags, lifecycle
+internal/config/           Configuration parsing, validation, Secret references
+internal/authhttp/         Re-signable HTTP client, fixed endpoint policy, retry orchestration
+internal/limiter/          Layered Host/endpoint rate limiting and adaptive slowdown
+internal/qiniu/kodo/       /v6 statistics DTOs/client
+internal/qiniu/cdn/        Monitoring and analytics DTOs/client
+internal/qiniu/billing/    Fixed read-only GET client, money conversion
+internal/poller/           Scheduling, jitter, and task timeouts
+internal/snapshot/         Immutable dataset snapshots and atomic publication
+internal/collector/        Prometheus descriptors and Collect
+internal/telemetry/        Exporter self-monitoring metrics
+internal/app/              Registration of three module tasks and snapshot publication
 ```
 
-避免建立通用“万能七牛 API 框架”。三个模块只共享确实相同的 HTTP、签名、重试和快照原语；请求/响应 DTO 保持模块内局部、明确。
+Avoid building a universal Qiniu API framework. The three modules should share only genuinely common HTTP, signing, retry, and snapshot primitives. Keep request/response DTOs local and explicit within each module.
 
-## 15. 实施分期与验收
+## 15. Implementation Milestones and Acceptance
 
-### 阶段 0：真实账号 PoC
+### Phase 0: PoC with a Real Account
 
-1. 验证三类签名、时间头和重试重签名。
-2. 记录脱敏 fixtures，确认 CDN monitoring 单位、CDN analytics 多域名是否聚合、Kodo/CDN 时间字段时区。
-3. 验证 Kodo/CDN 统计类最小 IAM action、财务 IAM Key 可用性。
-4. 获取实际 bucket/domain 数，代入调用预算后确定 allowlist、并发和周期。
-5. 对照控制台核对一组容量、对象数、带宽/流量、命中率、余额和最终账单。
+Status: required for each production account and environment before enabling verification gates.
 
-### 阶段 1：MVP
+1. Verify the signing flows for all three modules, date headers, and re-signing on retry.
+2. Record sanitized fixtures and confirm CDN monitoring units, whether CDN analytics aggregate multiple domains, and the timezones of Kodo/CDN time fields.
+3. Verify the minimum Kodo/CDN statistics IAM actions and billing API access with an IAM key.
+4. Obtain actual bucket/domain counts, calculate the call budget, and then determine allowlists, concurrency, and intervals.
+5. Compare one set of capacity, object-count, bandwidth/traffic, hit-ratio, balance, and final-bill values against the console.
 
-1. 完成配置、签名 HTTP、限流/重试、快照和自监控。
-2. 实现三模块 P0 client 与 collector。
-3. 提供 `/metrics`、`/healthz`、`/readyz`、Docker 镜像和最小部署示例。
-4. 提供 Prometheus recording/alert rules：采集失败、数据过期、余额不足、资源包不足、CDN 5xx 比例、命中率下降、Kodo 容量增长。
+### Phase 1: MVP
 
-### 必须通过的验收
+Status: implemented.
 
-- `go test ./...` 和 `go test -race ./...` 通过。
-- httptest 覆盖 Qiniu/QBox 签名顺序、重试重新签名、body 重放、限流和超时。
-- fixtures 覆盖空数组、数组错位、重复/乱序时间点、429/403024、5xx、财务字段别名和 8 位定点数。
-- `/metrics` 路径零上游网络调用；上游中断后仍能抓取自监控和旧快照，且 freshness 告警能够触发。
-- 同一 fixture 重复采集不会产生新的 label 集；没有 `_total` 形式的上游历史桶业务指标。
-- 日志、指标和错误信息扫描不到 AK/SK、Authorization、email、account_id、order/bill ID。
+1. Configuration, signed HTTP, rate limiting/retries, snapshots, and self-monitoring are implemented.
+2. P0 clients and collectors are implemented for all three modules.
+3. `/metrics`, `/healthz`, `/readyz`, a Docker image, and deployment examples are provided.
+4. Prometheus recording and alert rules cover collection failure, stale data, low balance, low resource-pack balance, CDN 5xx ratio, declining hit ratio, and Kodo capacity growth.
 
-## 16. 与原交接稿相比的关键修正
+### Mandatory Acceptance Criteria
 
-1. 官方 Go SDK 虽封装了基础 CDN 计量和日志能力，但它们不在当前核心范围；MVP 只实现 monitoring/analytics 的固定只读 REST client。
-2. Kodo 各存储类型容量/对象数使用不同 `/v6/space*`、`/v6/count*` 端点，不是给 `/v6/count` 增加一个统一 `storage_type` 参数。
-3. 月总费用应使用 `bill/detail.total_money`；`bill/overview` 是条目概览，不能当作月总额。
-4. 财务还有 `bill/snapshot` 每日预估接口；它是运营成本监控的核心数据源。
-5. Kodo 和财务未公布 QPS，不得套用 CDN 的 5～10 QPS；配置中的 1 QPS只是 exporter 自身的安全默认值。
-6. 上游时间桶请求数、流量、费用快照会回溯、修订或重置，必须是 Gauge，不能使用 `_total` Counter。
-7. CDN/Kodo 公开统计不具备完整实时延迟 SLI，不能虚构对应指标。
+- `go test ./...` and `go test -race ./...` pass.
+- `httptest` covers Qiniu/QBox signing order, re-signing on retry, body replay, rate limiting, and timeouts.
+- Fixtures cover empty arrays, mismatched arrays, duplicate/out-of-order timestamps, 429/403024, 5xx, billing field aliases, and eight-decimal fixed-point numbers.
+- The `/metrics` path performs zero upstream network calls. After an upstream outage, self-monitoring metrics and old snapshots remain scrapeable until each dataset's `stale_after` duration expires, and freshness alerts can trigger.
+- Repeated collection of the same fixture creates no new label set. No upstream historical-bucket business metric uses the `_total` form.
+- Scans of logs, metrics, and errors find no AK/SK, Authorization, email, `account_id`, or order/bill ID.
 
-## 17. 官方资料
+## 16. Key Corrections from the Original Handoff
 
-- [七牛 Go SDK](https://pkg.go.dev/github.com/qiniu/go-sdk/v7)
-- [七牛 Go auth 包](https://pkg.go.dev/github.com/qiniu/go-sdk/v7/auth)
-- [Kodo 数据统计接口](https://developer.qiniu.com/kodo/3906/statistic-interface)
-- [Kodo blob_io](https://developer.qiniu.com/kodo/3820/blob-io)
-- [Kodo rs_put](https://developer.qiniu.com/kodo/3912/rs-put)
+1. Although the official Go SDK wraps basic CDN metering and logging capabilities, they are outside the current core scope. The MVP implements only fixed read-only REST clients for monitoring/analytics.
+2. Kodo capacity/object counts for each storage class use distinct `/v6/space*` and `/v6/count*` endpoints, not one `/v6/count` endpoint with a universal `storage_type` parameter.
+3. Use `bill/detail.total_money` for the monthly total. `bill/overview` is an entry overview and must not be treated as the monthly total.
+4. Billing also provides the `bill/snapshot` daily-estimate endpoint, which is a core data source for operational cost monitoring.
+5. Kodo and billing QPS limits are unpublished and must not inherit CDN's 5-10 QPS. The configured 1 QPS values are only the exporter's own conservative defaults.
+6. Upstream time-bucket request counts, traffic, and cost snapshots can be backfilled, revised, or reset, so they must be Gauges rather than `_total` Counters.
+7. Public CDN/Kodo statistics do not provide complete real-time latency SLIs; do not invent corresponding metrics.
+
+## 17. Official References
+
+- [Qiniu Go SDK](https://pkg.go.dev/github.com/qiniu/go-sdk/v7)
+- [Qiniu Go `auth` package](https://pkg.go.dev/github.com/qiniu/go-sdk/v7/auth)
+- [Kodo Data Statistics APIs](https://developer.qiniu.com/kodo/3906/statistic-interface)
+- [Kodo `blob_io`](https://developer.qiniu.com/kodo/3820/blob-io)
+- [Kodo `rs_put`](https://developer.qiniu.com/kodo/3912/rs-put)
 - [Kodo IAM Actions](https://developer.qiniu.com/af/12495/kodo-iam-actions)
-- [CDN API 总览](https://developer.qiniu.com/fusion/13353/fusion-api-overview)
-- [CDN 用量统计](https://developer.qiniu.com/fusion/13365/fusion-api-usage-stats)
-- [CDN 运营统计](https://developer.qiniu.com/fusion/13366/fusion-api-analytics)
-- [CDN 鉴权](https://developer.qiniu.com/fusion/13360/fusion-api-auth-guide)
+- [CDN API Overview](https://developer.qiniu.com/fusion/13353/fusion-api-overview)
+- [CDN Usage Statistics](https://developer.qiniu.com/fusion/13365/fusion-api-usage-stats)
+- [CDN Analytics](https://developer.qiniu.com/fusion/13366/fusion-api-analytics)
+- [CDN Authentication](https://developer.qiniu.com/fusion/13360/fusion-api-auth-guide)
 - [CDN IAM Actions](https://developer.qiniu.com/af/12493/cdn-actions)
-- [财务对外 API](https://developer.qiniu.com/af/10420/financial-external-api-documentation)
-- [Prometheus exporter 指南](https://prometheus.io/docs/instrumenting/writing_exporters/)
-- [Prometheus 指标命名](https://prometheus.io/docs/practices/naming/)
+- [Billing External APIs](https://developer.qiniu.com/af/10420/financial-external-api-documentation)
+- [Prometheus Exporter Guidelines](https://prometheus.io/docs/instrumenting/writing_exporters/)
+- [Prometheus Metric and Label Naming](https://prometheus.io/docs/practices/naming/)
