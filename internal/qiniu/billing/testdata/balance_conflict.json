@@ -1,0 +1,14 @@
+{
+  "code": 0,
+  "message": "Success",
+  "data": {
+    "available_balance": 100000000,
+    "balance": 200000000,
+    "cash_balance": 100000000,
+    "present_balance": 0,
+    "credit_line": 0,
+    "unpaid_money": 0,
+    "estimated_bills_money": 0,
+    "currency": "CNY"
+  }
+}

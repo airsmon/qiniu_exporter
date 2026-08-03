@@ -1,0 +1,402 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+jobs:
+  test:
+    name: Go and artifact tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          core='(0|[1-9][0-9]*)'
+          prerelease_identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          release_tag_pattern="^v${core}\.${core}\.${core}(-${prerelease_identifier}(\.${prerelease_identifier})*)?$"
+          if [[ ! "${GITHUB_REF_NAME}" =~ ${release_tag_pattern} ]]; then
+            echo "Release tags must use semantic versioning, for example v1.2.3 or v1.2.3-rc.1."
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Download and verify modules
+        run: |
+          go mod download
+          go mod verify
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          mapfile -d '' -t go_files < <(git ls-files -z -- "*.go")
+          formatted="$(gofmt -l "${go_files[@]}")"
+          if [[ -n "${formatted}" ]]; then
+            echo "The following files need gofmt:"
+            echo "${formatted}"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test -race -cover ./...
+
+      - name: Build binary
+        run: |
+          go build \
+            -trimpath \
+            -ldflags="-s -w -X main.version=ci -X main.revision=${GITHUB_SHA}" \
+            -o "${RUNNER_TEMP}/qiniu-exporter" \
+            ./cmd/qiniu-exporter
+          "${RUNNER_TEMP}/qiniu-exporter" --version
+
+      - name: Validate Grafana dashboard
+        run: jq -e '.title and (.panels | length > 0)' grafana/qiniu_exporter.json >/dev/null
+
+      - name: Render Docker Compose
+        env:
+          QINIU_EXPORTER_CONFIG_FILE: ./configs/qiniu-exporter.compose.yaml
+          QINIU_ACCESS_KEY_FILE: /dev/null
+          QINIU_SECRET_KEY_FILE: /dev/null
+        run: docker compose -f compose.yaml config > "${RUNNER_TEMP}/compose.yaml"
+
+      - name: Validate standalone Prometheus rules
+        run: |
+          docker run --rm \
+            --volume "${PWD}/rules:/rules:ro" \
+            --entrypoint /bin/promtool \
+            prom/prometheus:v3.11.3 \
+            check rules /rules/qiniu-exporter.rules.yml
+
+  helm:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Helm
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v4.2.0
+
+      - name: Lint chart
+        run: |
+          helm lint charts/qiniu-exporter --strict
+          helm lint charts/qiniu-exporter --strict --values charts/qiniu-exporter/ci/test-values.yaml
+          helm lint charts/qiniu-exporter --strict --values charts/qiniu-exporter/ci/generated-config-values.yaml
+
+      - name: Render chart scenarios
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm template qiniu-exporter charts/qiniu-exporter \
+            --namespace monitoring \
+            > "${RUNNER_TEMP}/qiniu-default.yaml"
+          helm template qiniu-exporter charts/qiniu-exporter \
+            --namespace monitoring \
+            --values charts/qiniu-exporter/ci/test-values.yaml \
+            --api-versions monitoring.coreos.com/v1/ServiceMonitor \
+            --api-versions monitoring.coreos.com/v1/PrometheusRule \
+            > "${RUNNER_TEMP}/qiniu-prometheus.yaml"
+          helm template qiniu-exporter charts/qiniu-exporter \
+            --namespace monitoring \
+            --values charts/qiniu-exporter/ci/generated-config-values.yaml \
+            > "${RUNNER_TEMP}/qiniu-generated.yaml"
+
+          if grep -q '^kind: ConfigMap$' "${RUNNER_TEMP}/qiniu-prometheus.yaml"; then
+            echo "The external configuration Secret scenario rendered a ConfigMap."
+            exit 1
+          fi
+          grep -q '^kind: ConfigMap$' "${RUNNER_TEMP}/qiniu-generated.yaml"
+
+      - name: Validate rendered Prometheus rules
+        shell: bash
+        run: |
+          set -euo pipefail
+          helm template qiniu-exporter charts/qiniu-exporter \
+            --namespace monitoring \
+            --values charts/qiniu-exporter/ci/test-values.yaml \
+            --show-only templates/prometheusrule.yaml \
+            > "${RUNNER_TEMP}/prometheusrule.yaml"
+
+          sed -n '/^spec:$/,$p' "${RUNNER_TEMP}/prometheusrule.yaml" \
+            | sed '1d; s/^  //' \
+            > "${RUNNER_TEMP}/qiniu-chart.rules.yml"
+
+          docker run --rm \
+            --volume "${RUNNER_TEMP}:/work:ro" \
+            --entrypoint /bin/promtool \
+            prom/prometheus:v3.11.3 \
+            check rules /work/qiniu-chart.rules.yml
+
+      - name: Package chart
+        run: helm package charts/qiniu-exporter --destination "${RUNNER_TEMP}"
+
+  container_smoke:
+    name: Container smoke (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    needs:
+      - test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: amd64
+            platform: linux/amd64
+          - name: arm64
+            platform: linux/arm64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build test image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          tags: qiniu-exporter:ci-${{ matrix.name }}
+          build-args: |
+            VERSION=ci
+            REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=container-smoke-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=container-smoke-${{ matrix.name }}
+
+      - name: Test image
+        run: docker run --rm --platform "${{ matrix.platform }}" "qiniu-exporter:ci-${{ matrix.name }}" --version
+
+  publish_image:
+    name: Publish container image
+    runs-on: ubuntu-latest
+    needs:
+      - test
+      - helm
+      - container_smoke
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Resolve image name
+        id: image
+        shell: bash
+        run: |
+          repository="${GITHUB_REPOSITORY,,}"
+          echo "name=ghcr.io/${repository}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: metadata
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ${{ steps.image.outputs.name }}
+          flavor: latest=auto
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{raw}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-
+
+      - name: Resolve version
+        id: build_info
+        shell: bash
+        env:
+          METADATA_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          version="${METADATA_VERSION}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          annotations: ${{ steps.metadata.outputs.annotations }}
+          build-args: |
+            VERSION=${{ steps.build_info.outputs.version }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha,scope=container-publish
+          cache-to: type=gha,mode=max,scope=container-publish
+          provenance: mode=max
+          sbom: true
+
+      - name: Write job summary
+        run: |
+          {
+            echo "### Published container image"
+            printf -- "- Image: %s\n" "${{ steps.image.outputs.name }}"
+            printf -- "- Digest: %s\n" "${{ steps.build.outputs.digest }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  publish_release:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs:
+      - publish_image
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Set up Helm
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v4.2.0
+
+      - name: Build release artifacts
+        shell: bash
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          release_version="${RELEASE_TAG#v}"
+          source_date_epoch="$(git show -s --format=%ct "${RELEASE_COMMIT}")"
+          go mod download
+          mkdir -p dist
+
+          for goarch in amd64 arm64; do
+            package_name="qiniu-exporter-${release_version}.linux-${goarch}"
+            package_dir="${RUNNER_TEMP}/${package_name}"
+            mkdir -p "${package_dir}/configs" "${package_dir}/grafana" "${package_dir}/rules"
+
+            CGO_ENABLED=0 GOOS=linux GOARCH="${goarch}" go build \
+              -trimpath \
+              -ldflags="-s -w -X main.version=${release_version} -X main.revision=${RELEASE_COMMIT}" \
+              -o "${package_dir}/qiniu-exporter" \
+              ./cmd/qiniu-exporter
+
+            install -m 0644 README.md DESIGN.md compose.yaml "${package_dir}/"
+            install -m 0644 configs/*.yaml "${package_dir}/configs/"
+            install -m 0644 grafana/*.json "${package_dir}/grafana/"
+            install -m 0644 rules/*.yml "${package_dir}/rules/"
+
+            tar \
+              --sort=name \
+              --owner=0 \
+              --group=0 \
+              --numeric-owner \
+              --mtime="@${source_date_epoch}" \
+              -C "${RUNNER_TEMP}" \
+              -czf "dist/${package_name}.tar.gz" \
+              "${package_name}"
+          done
+
+          version_output="$("${RUNNER_TEMP}/qiniu-exporter-${release_version}.linux-amd64/qiniu-exporter" --version)"
+          expected="qiniu-exporter ${release_version} (${RELEASE_COMMIT})"
+          if [[ "${version_output}" != "${expected}" ]]; then
+            echo "Unexpected version output: ${version_output}"
+            exit 1
+          fi
+
+          helm package charts/qiniu-exporter \
+            --version "${release_version}" \
+            --app-version "${release_version}" \
+            --destination dist
+
+          (
+            cd dist
+            sha256sum ./*.tar.gz ./*.tgz > sha256sums.txt
+            sha256sum --check sha256sums.txt
+          )
+
+      - name: Create GitHub release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          prerelease_args=()
+          if [[ "${RELEASE_TAG}" == *-* ]]; then
+            prerelease_args+=(--prerelease --latest=false)
+          fi
+          gh release create "${RELEASE_TAG}" \
+            dist/*.tar.gz \
+            dist/*.tgz \
+            dist/sha256sums.txt \
+            --verify-tag \
+            --generate-notes \
+            --title "qiniu_exporter ${RELEASE_TAG}" \
+            "${prerelease_args[@]}"

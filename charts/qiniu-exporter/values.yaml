@@ -1,0 +1,189 @@
+# Each replica polls Qiniu independently. This must remain one to avoid
+# duplicate time series and multiplying the configured API budget.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/airsmon/qiniu_exporter
+  pullPolicy: IfNotPresent
+  # Defaults to Chart.appVersion when empty.
+  tag: ""
+  # A digest takes precedence over tag when set.
+  digest: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+commonLabels: {}
+commonAnnotations: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # The exporter does not use the Kubernetes API.
+  automountServiceAccountToken: false
+
+deploymentAnnotations: {}
+podLabels: {}
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+revisionHistoryLimit: 3
+strategy:
+  # Recreate prevents two pollers from briefly consuming the same API budget.
+  type: Recreate
+terminationGracePeriodSeconds: 15
+
+exporter:
+  port: 9106
+  metricsPath: /metrics
+
+# The chart never creates a Secret and never accepts AK/SK values. Each item
+# references an existing Secret and is exposed to the generated configuration
+# as files under /var/run/secrets/qiniu/<item-index>/.
+credentials:
+  - name: main
+    existingSecret:
+      # Required before the default deployment can become Ready.
+      name: ""
+      accessKeyKey: access-key
+      secretKeyKey: secret-key
+
+config:
+  existingSecret:
+    # Mount a complete config.yaml from this Secret instead of generating a
+    # ConfigMap. Its server.listen must use exporter.port.
+    name: ""
+    key: config.yaml
+  generated:
+    kodo:
+      enabled: false
+      credential: main
+      statisticsTimezoneVerified: false
+      buckets: []
+      # - name: example-bucket
+      #   region: z0
+      storageClasses:
+        - standard
+        - ia
+        - archive_ir
+        - archive
+        - deep_archive
+        - intelligent_tiering
+    cdn:
+      enabled: false
+      credential: main
+      statisticsTimezoneVerified: false
+      monitoringUnitsVerified: false
+      domains: []
+      # - cdn.example.com
+    billing:
+      # Billing is the only module enabled by default so generated config.yaml
+      # is structurally valid. It still requires the existing credential Secret.
+      enabled: true
+      credential: main
+      timezone: Asia/Shanghai
+      resourcePackAllowlist: []
+      # - item: CDN加速通用计费项
+      #   zone: 中国大陆
+      #   availableTime: 全时段
+      #   unit: GB
+    collection:
+      sourceLag: 10m
+      staleAfter:
+        realtime: 30m
+        billingBalance: 3h
+        billingDaily: 36h
+        billingFinalized: 960h
+      kodoMaxQPS: 1
+      cdnFusionMaxQPS: 5
+      qiniuAPIHostMaxQPS: 10
+      billingMaxQPS: 1
+      limiterBurst: 1
+      firstRequestUtilization: 0.8
+      kodoMaxConcurrency: 1
+      cdnMaxConcurrency: 4
+      billingMaxConcurrency: 1
+
+service:
+  type: ClusterIP
+  port: 9106
+  annotations: {}
+  labels: {}
+
+startupProbe:
+  enabled: true
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 30
+  successThreshold: 1
+
+readinessProbe:
+  enabled: true
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+  successThreshold: 1
+
+livenessProbe:
+  enabled: true
+  periodSeconds: 30
+  timeoutSeconds: 2
+  failureThreshold: 3
+  successThreshold: 1
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  labels: {}
+  annotations: {}
+  interval: 30s
+  scrapeTimeout: 10s
+  honorLabels: false
+  relabelings: []
+  metricRelabelings: []
+  sampleLimit: 0
+
+prometheusRule:
+  enabled: false
+  namespace: ""
+  labels: {}
+  annotations: {}
+  # Labels added to each built-in alert (severity remains rule-specific).
+  ruleLabels: {}
+  # Mirrors rules/qiniu-exporter.rules.yml.
+  builtinRules: true
+  # Complete additional Prometheus rule groups.
+  additionalGroups: []
+
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []

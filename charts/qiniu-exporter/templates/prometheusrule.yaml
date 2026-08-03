@@ -1,0 +1,123 @@
+{{- if .Values.prometheusRule.enabled }}
+{{- $annotations := mergeOverwrite (dict) .Values.commonAnnotations .Values.prometheusRule.annotations }}
+{{- $labels := mergeOverwrite (dict) .Values.prometheusRule.labels (include "qiniu-exporter.labels" . | fromYaml) }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "qiniu-exporter.fullname" . }}
+  namespace: {{ default .Release.Namespace .Values.prometheusRule.namespace }}
+  labels:
+    {{- toYaml $labels | nindent 4 }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if or .Values.prometheusRule.builtinRules .Values.prometheusRule.additionalGroups }}
+  groups:
+    {{- if .Values.prometheusRule.builtinRules }}
+    - name: {{ include "qiniu-exporter.fullname" . }}
+      rules:
+        - alert: QiniuExporterCollectionFailed
+          expr: qiniu_exporter_collector_success == 0
+          for: 20m
+          labels:
+            {{- include "qiniu-exporter.alertLabels" (dict "root" . "severity" "warning") | nindent 12 }}
+          annotations:
+            summary: "Qiniu exporter collector is failing"
+            description: {{ "{{ $labels.module }}/{{ $labels.collector }} has not completed successfully." | quote }}
+
+        - alert: QiniuExporterDataStale
+          expr: |
+            time() - qiniu_exporter_data_timestamp_seconds
+              > on (module, collector)
+                qiniu_exporter_collector_stale_after_seconds
+          for: 5m
+          labels:
+            {{- include "qiniu-exporter.alertLabels" (dict "root" . "severity" "warning") | nindent 12 }}
+          annotations:
+            summary: "Qiniu exporter data is stale"
+            description: {{ "{{ $labels.module }}/{{ $labels.collector }} upstream data exceeded its configured stale-after duration." | quote }}
+
+        - alert: QiniuExporterCollectionStale
+          expr: |
+            (
+              time() - qiniu_exporter_collector_last_success_timestamp_seconds
+                > on (module, collector)
+                  qiniu_exporter_collector_stale_after_seconds
+            )
+            unless on (module, collector)
+              qiniu_exporter_data_timestamp_seconds
+          for: 5m
+          labels:
+            {{- include "qiniu-exporter.alertLabels" (dict "root" . "severity" "warning") | nindent 12 }}
+          annotations:
+            summary: "Qiniu exporter collection is stale"
+            description: {{ "{{ $labels.module }}/{{ $labels.collector }} has no upstream data timestamp and has exceeded its configured stale-after duration since the last success." | quote }}
+
+        - alert: QiniuBillingBalanceLow
+          expr: qiniu_billing_available_balance < 100
+          for: 15m
+          labels:
+            {{- include "qiniu-exporter.alertLabels" (dict "root" . "severity" "warning") | nindent 12 }}
+          annotations:
+            summary: "Qiniu account balance is low"
+            description: {{ "Available {{ $labels.currency }} balance is {{ $value }}; adjust the threshold for your account." | quote }}
+
+        - alert: QiniuResourcePackLow
+          expr: qiniu_billing_resource_pack_remaining_ratio < 0.1
+          for: 15m
+          labels:
+            {{- include "qiniu-exporter.alertLabels" (dict "root" . "severity" "warning") | nindent 12 }}
+          annotations:
+            summary: "Qiniu resource pack is nearly exhausted"
+            description: {{ "{{ $labels.item }} / {{ $labels.zone }} has less than 10% remaining." | quote }}
+
+        - alert: QiniuResourcePackOverviewEmpty
+          expr: qiniu_billing_resource_pack_records == 0
+          for: 15m
+          labels:
+            {{- include "qiniu-exporter.alertLabels" (dict "root" . "severity" "warning") | nindent 12 }}
+          annotations:
+            summary: "Qiniu resource-pack overview is empty"
+            description: "The latest complete resource-pack overview contains no records; disable this alert if the account intentionally uses no resource packs."
+
+        - record: qiniu_cdn_http_5xx_ratio
+          expr: |
+            (
+              sum by (domain) (qiniu_cdn_http_responses_per_second{code=~"5[0-9][0-9]|5xx"})
+              or on (domain)
+              0 * sum by (domain) (qiniu_cdn_http_responses_per_second)
+            )
+            /
+            sum by (domain) (qiniu_cdn_http_responses_per_second)
+
+        - alert: QiniuCDNHigh5xxRatio
+          expr: qiniu_cdn_http_5xx_ratio > 0.05
+          for: 10m
+          labels:
+            {{- include "qiniu-exporter.alertLabels" (dict "root" . "severity" "critical") | nindent 12 }}
+          annotations:
+            summary: "Qiniu CDN 5xx ratio is high"
+            description: {{ "{{ $labels.domain }} has a 5xx ratio above 5%." | quote }}
+
+        - alert: QiniuCDNCacheHitRatioLow
+          expr: qiniu_cdn_cache_request_hit_ratio < 0.8
+          for: 15m
+          labels:
+            {{- include "qiniu-exporter.alertLabels" (dict "root" . "severity" "warning") | nindent 12 }}
+          annotations:
+            summary: "Qiniu CDN cache hit ratio is low"
+            description: {{ "{{ $labels.domain }} request hit ratio is below 80%; tune this threshold for the workload." | quote }}
+
+        - record: qiniu_kodo_storage_growth_bytes_per_second
+          expr: deriv(qiniu_kodo_storage_bytes[6h])
+    {{- end }}
+    {{- with .Values.prometheusRule.additionalGroups }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- else }}
+  groups: []
+  {{- end }}
+{{- end }}
+

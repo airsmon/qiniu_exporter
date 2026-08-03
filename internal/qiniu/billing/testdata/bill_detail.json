@@ -1,0 +1,9 @@
+{
+  "code": 0,
+  "message": "Success",
+  "data": {
+    "total_money": 538323000000,
+    "currency": "CNY",
+    "list": []
+  }
+}

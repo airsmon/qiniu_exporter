@@ -1,0 +1,30 @@
+image:
+  repository: example.invalid/monitoring/qiniu-exporter
+  tag: ci
+
+credentials:
+  - name: main
+    existingSecret:
+      name: qiniu-exporter-credentials
+      accessKeyKey: access-key
+      secretKeyKey: secret-key
+
+config:
+  existingSecret:
+    name: qiniu-exporter-config
+    key: exporter.yaml
+
+serviceMonitor:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
+
+prometheusRule:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
+  ruleLabels:
+    team: platform
+
+podAnnotations:
+  ci.qiniu-exporter/enabled: "true"

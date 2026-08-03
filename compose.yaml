@@ -1,0 +1,35 @@
+services:
+  qiniu-exporter:
+    image: ${QINIU_EXPORTER_IMAGE:-qiniu-exporter:local}
+    build:
+      context: .
+      args:
+        VERSION: ${QINIU_EXPORTER_VERSION:-dev}
+        REVISION: ${QINIU_EXPORTER_REVISION:-compose}
+    command:
+      - --config.file=/etc/qiniu-exporter/config.yaml
+    ports:
+      - "${QINIU_EXPORTER_BIND_ADDRESS:-127.0.0.1}:${QINIU_EXPORTER_PORT:-9106}:9106"
+    volumes:
+      - type: bind
+        source: ${QINIU_EXPORTER_CONFIG_FILE:-./config.yaml}
+        target: /etc/qiniu-exporter/config.yaml
+        read_only: true
+    secrets:
+      - qiniu_access_key
+      - qiniu_secret_key
+    user: "65532:65532"
+    read_only: true
+    init: true
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 100
+
+secrets:
+  qiniu_access_key:
+    file: ${QINIU_ACCESS_KEY_FILE:-./secrets/qiniu_access_key}
+  qiniu_secret_key:
+    file: ${QINIU_SECRET_KEY_FILE:-./secrets/qiniu_secret_key}

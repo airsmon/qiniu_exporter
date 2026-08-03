@@ -1,0 +1,20 @@
+apiVersion: v2
+name: qiniu-exporter
+description: Prometheus exporter for Qiniu Kodo, CDN, and billing statistics
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/airsmon/qiniu_exporter
+sources:
+  - https://github.com/airsmon/qiniu_exporter
+keywords:
+  - monitoring
+  - prometheus
+  - exporter
+  - qiniu
+  - kodo
+  - cdn
+maintainers:
+  - name: airsmon
+    url: https://github.com/airsmon
+

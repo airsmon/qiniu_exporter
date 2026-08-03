@@ -1,0 +1,15 @@
+{
+  "code": 0,
+  "message": "Success",
+  "data": [
+    {
+      "available_time": "all",
+      "item_name": "CDN traffic",
+      "month_remain": 5120,
+      "month_used": 128,
+      "respack_unit": "GB",
+      "total_surplus": 5248,
+      "zone_name": "mainland"
+    }
+  ]
+}

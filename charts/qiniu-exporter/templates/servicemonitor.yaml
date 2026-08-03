@@ -1,0 +1,40 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{- $annotations := mergeOverwrite (dict) .Values.commonAnnotations .Values.serviceMonitor.annotations }}
+{{- $labels := mergeOverwrite (dict) .Values.serviceMonitor.labels (include "qiniu-exporter.labels" . | fromYaml) }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "qiniu-exporter.fullname" . }}
+  namespace: {{ default .Release.Namespace .Values.serviceMonitor.namespace }}
+  labels:
+    {{- toYaml $labels | nindent 4 }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      {{- include "qiniu-exporter.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      path: {{ .Values.exporter.metricsPath }}
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+      honorLabels: {{ .Values.serviceMonitor.honorLabels }}
+      {{- with .Values.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if gt (int .Values.serviceMonitor.sampleLimit) 0 }}
+      sampleLimit: {{ .Values.serviceMonitor.sampleLimit }}
+      {{- end }}
+{{- end }}
+

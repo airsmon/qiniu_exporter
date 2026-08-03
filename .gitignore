@@ -1,0 +1,5 @@
+/config.yaml
+/qiniu-exporter
+/*.env
+/secrets/
+/.DS_Store

@@ -1,0 +1,19 @@
+Qiniu exporter has been installed.
+
+Service:
+  {{ include "qiniu-exporter.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+Metrics:
+  {{ .Values.exporter.metricsPath }}
+
+{{- if not .Values.config.existingSecret.name }}
+{{- range .Values.credentials }}
+{{- if not .existingSecret.name }}
+
+WARNING: credential {{ .name | quote }} has no existing Secret. Set
+credentials[].existingSecret.name before expecting the exporter to become Ready.
+{{- end }}
+{{- end }}
+{{- end }}
+
+The chart does not create credential Secrets. Do not put AK/SK values in Helm
+values because Helm persists release values in the cluster.

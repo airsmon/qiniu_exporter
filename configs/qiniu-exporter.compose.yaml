@@ -1,0 +1,57 @@
+server:
+  listen: ":9106"
+
+credentials:
+  main:
+    access_key_file: /run/secrets/qiniu_access_key
+    secret_key_file: /run/secrets/qiniu_secret_key
+
+kodo:
+  enabled: true
+  credential: main
+  # Keep false until request/response time semantics match the console.
+  statistics_timezone_verified: false
+  buckets:
+    - name: example-bucket
+      region: z0
+  storage_classes:
+    - standard
+    - ia
+    - archive_ir
+    - archive
+    - deep_archive
+    - intelligent_tiering
+
+cdn:
+  enabled: true
+  credential: main
+  # Keep false until timestamps match the console in Asia/Shanghai.
+  statistics_timezone_verified: false
+  # Set true only after comparing monitoring bandwidth/flow with the console.
+  monitoring_units_verified: false
+  domains:
+    - cdn.example.com
+
+billing:
+  enabled: true
+  credential: main
+  timezone: Asia/Shanghai
+  # Exact account-specific tuples only. Leave empty to disable this collector.
+  resource_pack_allowlist: []
+
+collection:
+  source_lag: 10m
+  stale_after:
+    realtime: 30m
+    billing_balance: 3h
+    billing_daily: 36h
+    billing_finalized: 40d
+  kodo_max_qps: 1
+  cdn_fusion_max_qps: 5
+  qiniu_api_host_max_qps: 10
+  billing_max_qps: 1
+  limiter_burst: 1
+  first_request_utilization: 0.8
+  kodo_max_concurrency: 1
+  cdn_max_concurrency: 4
+  billing_max_concurrency: 1

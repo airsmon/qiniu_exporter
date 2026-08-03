@@ -1,0 +1,97 @@
+groups:
+  - name: qiniu-exporter
+    rules:
+      - alert: QiniuExporterCollectionFailed
+        expr: qiniu_exporter_collector_success == 0
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qiniu exporter collector is failing"
+          description: "{{ $labels.module }}/{{ $labels.collector }} has not completed successfully."
+
+      - alert: QiniuExporterDataStale
+        expr: |
+          time() - qiniu_exporter_data_timestamp_seconds
+            > on (module, collector)
+              qiniu_exporter_collector_stale_after_seconds
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qiniu exporter data is stale"
+          description: "{{ $labels.module }}/{{ $labels.collector }} upstream data exceeded its configured stale-after duration."
+
+      - alert: QiniuExporterCollectionStale
+        expr: |
+          (
+            time() - qiniu_exporter_collector_last_success_timestamp_seconds
+              > on (module, collector)
+                qiniu_exporter_collector_stale_after_seconds
+          )
+          unless on (module, collector)
+            qiniu_exporter_data_timestamp_seconds
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qiniu exporter collection is stale"
+          description: "{{ $labels.module }}/{{ $labels.collector }} has no upstream data timestamp and has exceeded its configured stale-after duration since the last success."
+
+      - alert: QiniuBillingBalanceLow
+        expr: qiniu_billing_available_balance < 100
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qiniu account balance is low"
+          description: "Available {{ $labels.currency }} balance is {{ $value }}; adjust the threshold for your account."
+
+      - alert: QiniuResourcePackLow
+        expr: qiniu_billing_resource_pack_remaining_ratio < 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qiniu resource pack is nearly exhausted"
+          description: "{{ $labels.item }} / {{ $labels.zone }} has less than 10% remaining."
+
+      - alert: QiniuResourcePackOverviewEmpty
+        expr: qiniu_billing_resource_pack_records == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qiniu resource-pack overview is empty"
+          description: "The latest complete resource-pack overview contains no records; disable this alert if the account intentionally uses no resource packs."
+
+      - record: qiniu_cdn_http_5xx_ratio
+        expr: |
+          (
+            sum by (domain) (qiniu_cdn_http_responses_per_second{code=~"5[0-9][0-9]|5xx"})
+            or on (domain)
+            0 * sum by (domain) (qiniu_cdn_http_responses_per_second)
+          )
+          /
+          sum by (domain) (qiniu_cdn_http_responses_per_second)
+
+      - alert: QiniuCDNHigh5xxRatio
+        expr: qiniu_cdn_http_5xx_ratio > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Qiniu CDN 5xx ratio is high"
+          description: "{{ $labels.domain }} has a 5xx ratio above 5%."
+
+      - alert: QiniuCDNCacheHitRatioLow
+        expr: qiniu_cdn_cache_request_hit_ratio < 0.8
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Qiniu CDN cache hit ratio is low"
+          description: "{{ $labels.domain }} request hit ratio is below 80%; tune this threshold for the workload."
+
+      - record: qiniu_kodo_storage_growth_bytes_per_second
+        expr: deriv(qiniu_kodo_storage_bytes[6h])

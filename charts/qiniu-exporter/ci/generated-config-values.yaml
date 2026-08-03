@@ -1,0 +1,25 @@
+image:
+  repository: example.invalid/monitoring/qiniu-exporter
+  tag: ci
+
+credentials:
+  - name: main
+    existingSecret:
+      name: qiniu-exporter-credentials
+      accessKeyKey: access-key
+      secretKeyKey: secret-key
+
+config:
+  generated:
+    kodo:
+      enabled: true
+      buckets:
+        - name: test-bucket
+          region: z0
+    cdn:
+      enabled: true
+      domains:
+        - cdn.example.com
+    billing:
+      enabled: true
+
