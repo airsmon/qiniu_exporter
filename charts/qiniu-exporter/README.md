@@ -54,7 +54,8 @@ config:
       domains:
         - cdn.example.com
     billing:
-      enabled: true
+      # Enable only when this credential has financial API access.
+      enabled: false
       credential: main
 ```
 
@@ -74,7 +75,9 @@ Secret.
 
 Defaults enable only Billing, keeping the generated exporter configuration
 structurally valid, but intentionally omit a Secret name. Supply the existing
-credential Secret before expecting the Pod to become Ready.
+credential Secret before expecting the Pod to become Ready. For a restricted
+sub-account, enable Kodo or CDN and explicitly set `config.generated.billing.enabled`
+to `false`.
 
 Do not pass AK/SK values through `--set`, values files, ConfigMaps, or
 `extraEnv`. Helm persists release values in the cluster.
@@ -151,6 +154,7 @@ only complete groups supplied through `prometheusRule.additionalGroups`.
   External Secrets require an explicit restart.
 - Keep the Kodo/CDN verification gates false until their timestamps and CDN
   monitoring units have been compared with the Qiniu console.
+- Enable Billing only when the selected credential has financial API access.
 
 ## Validate
 
@@ -166,3 +170,7 @@ helm template qiniu-exporter charts/qiniu-exporter \
   --values charts/qiniu-exporter/ci/generated-config-values.yaml
 helm package charts/qiniu-exporter
 ```
+
+## License
+
+This chart is licensed under the [MIT License](./LICENSE).

@@ -99,9 +99,9 @@ config:
       credential: main
       timezone: Asia/Shanghai
       resourcePackAllowlist: []
-      # - item: CDN加速通用计费项
-      #   zone: 中国大陆
-      #   availableTime: 全时段
+      # - item: exact-item-name-from-console
+      #   zone: exact-zone-name-from-console
+      #   availableTime: exact-availability-name-from-console
       #   unit: GB
     collection:
       sourceLag: 10m

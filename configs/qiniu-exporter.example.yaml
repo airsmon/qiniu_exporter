@@ -39,9 +39,9 @@ billing:
   # Exact account-specific tuples only. Leave empty to disable this collector.
   resource_pack_allowlist: []
   # resource_pack_allowlist:
-  #   - item: CDN加速通用计费项
-  #     zone: 中国大陆
-  #     available_time: 全时段
+  #   - item: exact-item-name-from-console
+  #     zone: exact-zone-name-from-console
+  #     available_time: exact-availability-name-from-console
   #     unit: GB
 
 collection:

@@ -347,7 +347,7 @@ jobs:
               -o "${package_dir}/qiniu-exporter" \
               ./cmd/qiniu-exporter
 
-            install -m 0644 README.md DESIGN.md compose.yaml "${package_dir}/"
+            install -m 0644 LICENSE README.md DESIGN.md compose.yaml "${package_dir}/"
             install -m 0644 configs/*.yaml "${package_dir}/configs/"
             install -m 0644 grafana/*.json "${package_dir}/grafana/"
             install -m 0644 rules/*.yml "${package_dir}/rules/"

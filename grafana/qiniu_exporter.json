@@ -28,7 +28,7 @@
       "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
       "id": 1,
       "panels": [],
-      "title": "Exporter · 健康、数据新鲜度与 API 限流",
+      "title": "Exporter · Health, Data Freshness, and API Rate Limiting",
       "type": "row"
     },
     {
@@ -407,7 +407,7 @@
       "gridPos": {"h": 1, "w": 24, "x": 0, "y": 20},
       "id": 10,
       "panels": [],
-      "title": "Kodo · 对象存储",
+      "title": "Kodo · Object Storage",
       "type": "row"
     },
     {
@@ -503,7 +503,7 @@
       "gridPos": {"h": 1, "w": 24, "x": 0, "y": 37},
       "id": 20,
       "panels": [],
-      "title": "CDN · 流量、请求、状态码与缓存",
+      "title": "CDN · Traffic, Requests, Status Codes, and Cache",
       "type": "row"
     },
     {
@@ -698,7 +698,7 @@
       "gridPos": {"h": 1, "w": 24, "x": 0, "y": 70},
       "id": 30,
       "panels": [],
-      "title": "Billing · 余额、费用与资源包",
+      "title": "Billing · Balance, Costs, and Resource Packs",
       "type": "row"
     },
     {
