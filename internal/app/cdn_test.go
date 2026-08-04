@@ -193,6 +193,146 @@ func TestAnalyticsRejectsMismatchedBucketEnds(t *testing.T) {
 	}
 }
 
+func TestAnalyticsTreatsExplicitEmptyRequestCountAsIdle(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain := "idle.example.com"
+	calls := 0
+	doer := appDoerFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return appJSONResponse(`{"code":200,"error":"","data":{"points":[],"reqCount":[]}}`), nil
+	})
+	client, err := cdn.NewClient(doer, "https://fusion.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{}
+	oldEnd := time.Now().Add(-20 * time.Minute)
+	store.Publish(domain, collector.CDNAnalyticsSnapshot{
+		Requests: cdn.RequestRateSample{Domain: domain, Region: cdn.RegionGlobal, RequestsPerSecond: 12, BucketEnd: oldEnd},
+	}, snapshot.Meta{CollectedAt: time.Now(), DataAt: oldEnd, StaleAfter: time.Hour})
+	metrics := telemetry.New(prometheus.NewRegistry(), "test", "test")
+	bad := map[string]error{}
+	var badMu sync.RWMutex
+
+	err = collectCDNAnalytics(context.Background(), client, domain, 10*time.Minute, time.Hour, location, store, metrics, &badMu, bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("API calls=%d, want only request-count", calls)
+	}
+	values := store.Load(time.Now())
+	value, ok := values[domain]
+	if !ok {
+		t.Fatal("idle snapshot was not published")
+	}
+	analytics := value.Data
+	if analytics.Requests.RequestsPerSecond != 0 || analytics.Requests.Domain != domain || analytics.Requests.Region != cdn.RegionGlobal {
+		t.Fatalf("request sample=%#v, want zero global sample", analytics.Requests)
+	}
+	if !analytics.Requests.BucketEnd.Equal(analytics.Requests.BucketStart.Add(cdn.FiveMinuteBucket)) || !value.Meta.DataAt.Equal(analytics.Requests.BucketEnd) {
+		t.Fatalf("idle bucket=[%s,%s), dataAt=%s", analytics.Requests.BucketStart, analytics.Requests.BucketEnd, value.Meta.DataAt)
+	}
+	if !analytics.Requests.BucketEnd.After(oldEnd) {
+		t.Fatalf("old snapshot was not replaced: old=%s new=%s", oldEnd, analytics.Requests.BucketEnd)
+	}
+	if len(analytics.Statuses) != 0 || analytics.Cache.Domain != domain || analytics.Cache.Region != cdn.RegionGlobal || analytics.Cache.RequestHitRatioValid || analytics.Cache.TrafficHitRatioValid {
+		t.Fatalf("idle analytics=%#v, want empty statuses and zero cache with undefined ratios", analytics)
+	}
+	if !analytics.Cache.BucketStart.Equal(analytics.Requests.BucketStart) || !analytics.Cache.BucketEnd.Equal(analytics.Requests.BucketEnd) {
+		t.Fatalf("cache bucket=%#v does not match request bucket=%#v", analytics.Cache, analytics.Requests)
+	}
+	if len(bad) != 0 {
+		t.Fatalf("negative cache=%v, want empty", bad)
+	}
+}
+
+func TestIdleCDNAnalyticsSnapshotRequiresExplicitEmptySameDate(t *testing.T) {
+	safeBefore := time.Date(2026, 8, 4, 10, 10, 0, 0, time.FixedZone("UTC+8", 8*60*60))
+	tests := []struct {
+		name     string
+		response cdn.RequestCountResponse
+		date     string
+		matched  bool
+		wantErr  error
+	}{
+		{name: "missing arrays", response: cdn.RequestCountResponse{Code: 200}, date: "2026-08-04"},
+		{name: "only points present empty", response: cdn.RequestCountResponse{Code: 200, Data: cdn.RequestCountData{Points: []string{}}}, date: "2026-08-04"},
+		{name: "only request count present empty", response: cdn.RequestCountResponse{Code: 200, Data: cdn.RequestCountData{ReqCount: []float64{}}}, date: "2026-08-04"},
+		{name: "asymmetric values", response: cdn.RequestCountResponse{Code: 200, Data: cdn.RequestCountData{Points: []string{}, ReqCount: []float64{1}}}, date: "2026-08-04"},
+		{name: "explicit idle", response: cdn.RequestCountResponse{Code: 200, Data: cdn.RequestCountData{Points: []string{}, ReqCount: []float64{}}}, date: "2026-08-04", matched: true},
+		{name: "midnight out of query scope", response: cdn.RequestCountResponse{Code: 200, Data: cdn.RequestCountData{Points: []string{}, ReqCount: []float64{}}}, date: "2026-08-04", matched: true, wantErr: cdn.ErrNoSafePoint},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			before := safeBefore
+			if test.name == "midnight out of query scope" {
+				before = time.Date(2026, 8, 4, 0, 0, 0, 0, safeBefore.Location())
+			}
+			_, matched, err := idleCDNAnalyticsSnapshot(test.response, "idle.example.com", before, test.date)
+			if matched != test.matched || !errors.Is(err, test.wantErr) {
+				t.Fatalf("matched=%t error=%v, want matched=%t error=%v", matched, err, test.matched, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestAnalyticsDoesNotOverwriteSnapshotForNonIdleNoSafeResponses(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	safePoint := time.Now().In(location).Add(-20 * time.Minute).Truncate(cdn.FiveMinuteBucket).Format("2006-01-02-15-04")
+	unsafePoint := time.Now().In(location).Add(time.Hour).Truncate(cdn.FiveMinuteBucket).Format("2006-01-02-15-04")
+	tests := []struct {
+		name    string
+		body    string
+		wantErr error
+	}{
+		{name: "missing arrays", body: `{"code":200,"error":"","data":{}}`, wantErr: cdn.ErrNoSafePoint},
+		{name: "empty points with request values", body: `{"code":200,"error":"","data":{"points":[],"reqCount":[1]}}`, wantErr: cdn.ErrNoSafePoint},
+		{name: "points with empty request values", body: fmt.Sprintf(`{"code":200,"error":"","data":{"points":[%q],"reqCount":[]}}`, safePoint), wantErr: cdn.ErrSeriesMisaligned},
+		{name: "unsafe point", body: fmt.Sprintf(`{"code":200,"error":"","data":{"points":[%q],"reqCount":[1]}}`, unsafePoint), wantErr: cdn.ErrNoSafePoint},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			doer := appDoerFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				return appJSONResponse(test.body), nil
+			})
+			client, err := cdn.NewClient(doer, "https://fusion.test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			domain := "cdn.example.com"
+			oldEnd := time.Now().Add(-20 * time.Minute)
+			store := &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{}
+			store.Publish(domain, collector.CDNAnalyticsSnapshot{
+				Requests: cdn.RequestRateSample{Domain: domain, Region: cdn.RegionGlobal, RequestsPerSecond: 12, BucketEnd: oldEnd},
+			}, snapshot.Meta{CollectedAt: time.Now(), DataAt: oldEnd, StaleAfter: time.Hour})
+			metrics := telemetry.New(prometheus.NewRegistry(), "test", "test")
+			bad := map[string]error{}
+			var badMu sync.RWMutex
+
+			err = collectCDNAnalytics(context.Background(), client, domain, 10*time.Minute, time.Hour, location, store, metrics, &badMu, bad)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("error=%v, want %v", err, test.wantErr)
+			}
+			if calls != 1 {
+				t.Fatalf("API calls=%d, want 1", calls)
+			}
+			value, ok := store.Load(time.Now())[domain]
+			if !ok || value.Data.Requests.RequestsPerSecond != 12 || !value.Data.Requests.BucketEnd.Equal(oldEnd) {
+				t.Fatalf("last-good snapshot was overwritten: %#v", value)
+			}
+		})
+	}
+}
+
 func TestMonitoringIsolationAttemptBudgetDoesNotCacheUnresolvedDomains(t *testing.T) {
 	location, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {

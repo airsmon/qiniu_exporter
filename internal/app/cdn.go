@@ -236,6 +236,14 @@ func collectCDNAnalytics(
 	if err != nil {
 		return cacheInvalidCDNDomain(err, domain, badMu, bad)
 	}
+	if idle, matched, idleErr := idleCDNAnalyticsSnapshot(requestsResponse, domain, safeBefore, date); matched {
+		if idleErr != nil {
+			return idleErr
+		}
+		store.Publish(domain, idle, snapshot.Meta{CollectedAt: time.Now(), DataAt: idle.Requests.BucketEnd, StaleAfter: staleAfter})
+		metrics.SetResourceDataTimestamp("cdn", "analytics", domain, idle.Requests.BucketEnd)
+		return nil
+	}
 	requests, err := cdn.SelectLatestSafeRequestRate5Min(requestsResponse, domain, cdn.RegionGlobal, safeBefore, location)
 	if err != nil {
 		return err
@@ -276,6 +284,30 @@ func collectCDNAnalytics(
 	}, snapshot.Meta{CollectedAt: time.Now(), DataAt: dataAt, StaleAfter: staleAfter})
 	metrics.SetResourceDataTimestamp("cdn", "analytics", domain, dataAt)
 	return nil
+}
+
+// Qiniu represents an idle domain as two present-but-empty request-count
+// arrays. Infer the newest complete zero bucket only when it belongs to the
+// date sent in this query; at midnight the preceding bucket is out of scope.
+func idleCDNAnalyticsSnapshot(response cdn.RequestCountResponse, domain string, safeBefore time.Time, queryDate string) (collector.CDNAnalyticsSnapshot, bool, error) {
+	var result collector.CDNAnalyticsSnapshot
+	if response.Data.Points == nil || response.Data.ReqCount == nil || len(response.Data.Points) != 0 || len(response.Data.ReqCount) != 0 {
+		return result, false, nil
+	}
+	bucketEnd := safeBefore
+	bucketStart := bucketEnd.Add(-cdn.FiveMinuteBucket)
+	if bucketStart.Format("2006-01-02") != queryDate {
+		return result, true, cdn.ErrNoSafePoint
+	}
+	result.Requests = cdn.RequestRateSample{
+		Domain: domain, Region: cdn.RegionGlobal,
+		BucketStart: bucketStart, BucketEnd: bucketEnd,
+	}
+	result.Cache = cdn.CacheSample{
+		Domain: domain, Region: cdn.RegionGlobal,
+		BucketStart: bucketStart, BucketEnd: bucketEnd,
+	}
+	return result, true, nil
 }
 
 func cacheInvalidCDNDomain(err error, domain string, badMu *sync.RWMutex, bad map[string]error) error {
