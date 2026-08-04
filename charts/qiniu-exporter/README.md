@@ -80,8 +80,9 @@ settings all select the `main` credential and therefore use the same existing
 Secret.
 
 When Kodo or CDN is enabled, the exporter schedules immediate read-only
-discovery for every accessible Kodo bucket/region and active CDN domain, then
-refreshes the resource inventory once per hour by default. An initial failure
+discovery for every accessible Kodo bucket/region and CDN domain, uses only
+successful-state CDN domains for statistics, and refreshes the resource
+inventory once per hour by default. An initial failure
 does not block the HTTP server; it leaves the inventory empty and is reported
 by exporter self-metrics. No bucket, region, or domain list is required in Helm
 values. Discovery does not create, update, delete, publish, refresh, or prefetch

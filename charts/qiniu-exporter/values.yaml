@@ -89,7 +89,7 @@ config:
       credential: main
       statisticsTimezoneVerified: false
       monitoringUnitsVerified: false
-      # Active CDN domains are discovered automatically through a read-only API.
+      # All CDN domains are inventoried; only successful-state domains feed statistics.
     billing:
       # Billing is the only module enabled by default so generated config.yaml
       # is structurally valid. It still requires the existing credential Secret.
