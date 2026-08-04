@@ -46,12 +46,15 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 			} `json:"list"`
 		} `json:"templating"`
 		Panels []struct {
-			ID          int    `json:"id"`
-			Title       string `json:"title"`
-			Type        string `json:"type"`
-			Description string `json:"description"`
+			ID          int                        `json:"id"`
+			Title       string                     `json:"title"`
+			Type        string                     `json:"type"`
+			Description string                     `json:"description"`
+			GridPos     map[string]int             `json:"gridPos"`
+			Options     map[string]json.RawMessage `json:"options"`
 			FieldConfig struct {
-				Defaults map[string]json.RawMessage `json:"defaults"`
+				Defaults  map[string]json.RawMessage `json:"defaults"`
+				Overrides json.RawMessage            `json:"overrides"`
 			} `json:"fieldConfig"`
 			Targets []struct {
 				Expression string `json:"expr"`
@@ -66,8 +69,8 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 	if dashboard.Title == "" || len(dashboard.Panels) == 0 {
 		t.Fatal("Grafana dashboard title or panels are empty")
 	}
-	if dashboard.Version < 3 {
-		t.Fatalf("Grafana dashboard version = %d, want at least 3", dashboard.Version)
+	if dashboard.Version < 4 {
+		t.Fatalf("Grafana dashboard version = %d, want at least 4", dashboard.Version)
 	}
 
 	variables := make(map[string]int, len(dashboard.Templating.List))
@@ -134,12 +137,15 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 	}
 
 	panelByID := func(id int) *struct {
-		ID          int    `json:"id"`
-		Title       string `json:"title"`
-		Type        string `json:"type"`
-		Description string `json:"description"`
+		ID          int                        `json:"id"`
+		Title       string                     `json:"title"`
+		Type        string                     `json:"type"`
+		Description string                     `json:"description"`
+		GridPos     map[string]int             `json:"gridPos"`
+		Options     map[string]json.RawMessage `json:"options"`
 		FieldConfig struct {
-			Defaults map[string]json.RawMessage `json:"defaults"`
+			Defaults  map[string]json.RawMessage `json:"defaults"`
+			Overrides json.RawMessage            `json:"overrides"`
 		} `json:"fieldConfig"`
 		Targets []struct {
 			Expression string `json:"expr"`
@@ -181,10 +187,10 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 			t.Fatalf("Grafana panel %d does not preserve qiniu_account in aggregation or matching", id)
 		}
 	}
-	if _, exists := panelByID(31).FieldConfig.Defaults["thresholds"]; exists {
-		t.Fatal("balance and unpaid amount must not share generic thresholds")
+	if _, exists := ids[33]; exists {
+		t.Fatal("obsolete Billing Periods panel must be removed")
 	}
-	for _, id := range []int{8, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 31, 33, 34, 35, 36, 39, 40, 41, 42, 43} {
+	for _, id := range []int{8, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 31, 34, 35, 36, 39, 40, 41, 42, 43, 44, 45, 46} {
 		if panelByID(id).Description == "" {
 			t.Fatalf("Grafana panel %d must explain gated or disabled no-data semantics", id)
 		}
@@ -201,30 +207,53 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 			t.Fatalf("inventory panel %d is invalid: %#v", id, panel)
 		}
 	}
-	billingSnapshot := panelByID(31)
-	if billingSnapshot.Type != "stat" || len(billingSnapshot.Targets) != 4 {
-		t.Fatalf("Billing snapshot panel is invalid: %#v", billingSnapshot)
-	}
-	for _, target := range billingSnapshot.Targets {
-		if !target.Instant || !strings.Contains(target.Expression, "max by (qiniu_account, currency)") {
-			t.Fatalf("invalid Billing snapshot query: %#v", target)
+	regions := string(panelByID(40).FieldConfig.Overrides)
+	for _, token := range []string{"byName", "Region", "z0", "East China", "z1", "North China", "cn-east-2", "na0"} {
+		if !strings.Contains(regions, token) {
+			t.Fatalf("Bucket Inventory region mapping is missing %q: %s", token, regions)
 		}
 	}
-	billingPeriods := panelByID(33)
-	if billingPeriods.Type != "stat" || len(billingPeriods.Targets) != 3 {
-		t.Fatalf("Billing periods panel is invalid: %#v", billingPeriods)
+	stateSummary := panelByID(42)
+	if stateSummary.Type != "stat" || stateSummary.GridPos["x"] != 4 || stateSummary.GridPos["w"] != 8 || !strings.Contains(string(stateSummary.Options["colorMode"]), "background") {
+		t.Fatalf("CDN state summary is not a semantic stat block: %#v", stateSummary)
 	}
-	for _, target := range billingPeriods.Targets {
-		if !target.Instant || !strings.Contains(target.Expression, "max by (qiniu_account)") || !strings.Contains(target.Expression, "_timestamp_seconds") {
-			t.Fatalf("invalid Billing-period query: %#v", target)
+	stateColors := string(stateSummary.FieldConfig.Overrides)
+	for _, token := range []string{"success", "green", "processing", "blue", "failed", "red", "frozen", "orange", "offlined", "gray"} {
+		if !strings.Contains(stateColors, token) {
+			t.Fatalf("CDN state summary color mapping is missing %q: %s", token, stateColors)
 		}
+	}
+	stateTable := panelByID(43)
+	if stateTable.GridPos["x"] != 12 || stateTable.GridPos["w"] != 12 || !strings.Contains(string(stateTable.FieldConfig.Overrides), "color-background") {
+		t.Fatalf("CDN inventory state cells are not color blocks: %#v", stateTable)
+	}
+	for id, metric := range map[int]string{
+		31: "qiniu_billing_available_balance",
+		44: "qiniu_billing_unpaid_amount",
+		45: "qiniu_billing_estimated_cost",
+		46: "qiniu_billing_last_finalized_cost",
+	} {
+		card := panelByID(id)
+		if card.Type != "stat" || card.GridPos["y"] != 84 || card.GridPos["h"] != 5 || card.GridPos["w"] != 6 || len(card.Targets) != 1 {
+			t.Fatalf("Billing KPI card %d is invalid: %#v", id, card)
+		}
+		target := card.Targets[0]
+		if !target.Instant || !strings.Contains(target.Expression, metric) || !strings.Contains(target.Expression, "max by (qiniu_account, currency)") {
+			t.Fatalf("invalid Billing KPI card query: %#v", target)
+		}
+	}
+	if _, exists := panelByID(31).FieldConfig.Defaults["thresholds"]; exists {
+		t.Fatal("Available Balance must not assume an account-specific threshold")
+	}
+	if _, exists := panelByID(44).FieldConfig.Defaults["thresholds"]; !exists {
+		t.Fatal("Unpaid Amount must distinguish zero from positive debt")
 	}
 	monthly := panelByID(37)
-	if monthly.Type != "bargauge" || len(monthly.Targets) != 1 || !monthly.Targets[0].Instant || !strings.Contains(monthly.Targets[0].Expression, "qiniu_billing_current_year_monthly_finalized_cost") {
+	if monthly.Type != "bargauge" || monthly.GridPos["y"] != 89 || monthly.GridPos["w"] != 24 || len(monthly.Targets) != 1 || !monthly.Targets[0].Instant || !strings.Contains(monthly.Targets[0].Expression, "qiniu_billing_current_year_monthly_finalized_cost") {
 		t.Fatalf("current-year monthly Billing panel is invalid: %#v", monthly)
 	}
 	summary := panelByID(38)
-	if len(summary.Targets) != 3 {
+	if summary.GridPos["y"] != 97 || summary.GridPos["w"] != 24 || summary.GridPos["h"] != 5 || len(summary.Targets) != 3 {
 		t.Fatalf("current-year Billing summary target count = %d, want 3", len(summary.Targets))
 	}
 	for _, target := range summary.Targets {

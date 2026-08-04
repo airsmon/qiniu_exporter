@@ -10,7 +10,7 @@ Cloud.
 `qiniu_exporter` collects metrics from three Qiniu services:
 
 - **Kodo** (object storage): automatically discovered bucket inventory and
-  count, capacity, object count, request rate, and egress rate.
+  count, region-aware capacity, object count, request rate, and egress rate.
 - **CDN**: automatically discovered domain inventory, count, and operating
   state, plus bandwidth, traffic, request rate, HTTP response rate, and cache
   hit metrics.
@@ -78,6 +78,11 @@ classes and billing resource-pack tuples remain explicitly configured.
 
 The registry also exposes the standard Go runtime and process metric families,
 including `go_*` and `process_*`.
+
+The bundled Grafana dashboard keeps native Kodo region IDs in Prometheus while
+displaying verified IDs such as `z0` and `z1` with readable region names. It
+also renders CDN operating states as semantic color blocks and presents the
+four Billing snapshot values as separate KPI cards.
 
 Upstream time-bucket values and billing snapshots are gauges, even when they
 represent requests or traffic. They may be corrected or reset by Qiniu and are

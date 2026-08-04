@@ -27,16 +27,19 @@ CDN statistics panels are expected to have no data while their timezone or unit
 gate is active. Their dedicated inventory panels still show automatically
 discovered bucket/domain counts, names, regions, products, and bounded domain
 operating states. A CDN operating state is the latest Qiniu domain-management
-operation state, not an availability probe.
+operation state, not an availability probe. Known native Kodo region IDs are
+shown with readable names while retaining the raw ID, and CDN operating states
+use semantic color blocks in both the summary and inventory table.
 
 Resource-pack quantities include a `unit` label and must not be aggregated
 across different units. The resource-pack status panel distinguishes an empty
 allowlist, an enabled collector with zero records, and unavailable data.
 
-The Billing snapshot uses instant queries for available balance, unpaid amount,
-the current estimate, and the last finalized cost. Billing periods are shown as
-three dates rather than a time series. The `currency` variable defaults to the
-regex All value (`.*`), so older dashboard links containing
+The Billing overview uses four independent instant-query cards for available
+balance, unpaid amount, the current estimate, and the last finalized cost.
+Unpaid amount is green at zero and orange at 0.01 or more; the other cards
+avoid inventing account-specific financial thresholds. The `currency` variable
+defaults to the regex All value (`.*`), so older dashboard links containing
 `var-currency=$__all` continue to return data.
 
 The current-year Billing panels consume
