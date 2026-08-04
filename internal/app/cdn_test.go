@@ -193,7 +193,7 @@ func TestAnalyticsRejectsMismatchedBucketEnds(t *testing.T) {
 	}
 }
 
-func TestAnalyticsTreatsExplicitEmptyRequestCountAsIdle(t *testing.T) {
+func TestAnalyticsTreatsEmptyRequestCountAsIdle(t *testing.T) {
 	location, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
 		t.Fatal(err)
@@ -202,7 +202,7 @@ func TestAnalyticsTreatsExplicitEmptyRequestCountAsIdle(t *testing.T) {
 	calls := 0
 	doer := appDoerFunc(func(*http.Request) (*http.Response, error) {
 		calls++
-		return appJSONResponse(`{"code":200,"error":"","data":{"points":[],"reqCount":[]}}`), nil
+		return appJSONResponse(`{"code":200,"error":"","data":{}}`), nil
 	})
 	client, err := cdn.NewClient(doer, "https://fusion.test")
 	if err != nil {
@@ -250,7 +250,7 @@ func TestAnalyticsTreatsExplicitEmptyRequestCountAsIdle(t *testing.T) {
 	}
 }
 
-func TestIdleCDNAnalyticsSnapshotRequiresExplicitEmptySameDate(t *testing.T) {
+func TestIdleCDNAnalyticsSnapshotRequiresMatchingEmptySameDate(t *testing.T) {
 	safeBefore := time.Date(2026, 8, 4, 10, 10, 0, 0, time.FixedZone("UTC+8", 8*60*60))
 	tests := []struct {
 		name     string
@@ -259,7 +259,7 @@ func TestIdleCDNAnalyticsSnapshotRequiresExplicitEmptySameDate(t *testing.T) {
 		matched  bool
 		wantErr  error
 	}{
-		{name: "missing arrays", response: cdn.RequestCountResponse{Code: 200}, date: "2026-08-04"},
+		{name: "empty data object", response: cdn.RequestCountResponse{Code: 200}, date: "2026-08-04", matched: true},
 		{name: "only points present empty", response: cdn.RequestCountResponse{Code: 200, Data: cdn.RequestCountData{Points: []string{}}}, date: "2026-08-04"},
 		{name: "only request count present empty", response: cdn.RequestCountResponse{Code: 200, Data: cdn.RequestCountData{ReqCount: []float64{}}}, date: "2026-08-04"},
 		{name: "asymmetric values", response: cdn.RequestCountResponse{Code: 200, Data: cdn.RequestCountData{Points: []string{}, ReqCount: []float64{1}}}, date: "2026-08-04"},
@@ -292,7 +292,7 @@ func TestAnalyticsDoesNotOverwriteSnapshotForNonIdleNoSafeResponses(t *testing.T
 		body    string
 		wantErr error
 	}{
-		{name: "missing arrays", body: `{"code":200,"error":"","data":{}}`, wantErr: cdn.ErrNoSafePoint},
+		{name: "only points present empty", body: `{"code":200,"error":"","data":{"points":[]}}`, wantErr: cdn.ErrNoSafePoint},
 		{name: "empty points with request values", body: `{"code":200,"error":"","data":{"points":[],"reqCount":[1]}}`, wantErr: cdn.ErrNoSafePoint},
 		{name: "points with empty request values", body: fmt.Sprintf(`{"code":200,"error":"","data":{"points":[%q],"reqCount":[]}}`, safePoint), wantErr: cdn.ErrSeriesMisaligned},
 		{name: "unsafe point", body: fmt.Sprintf(`{"code":200,"error":"","data":{"points":[%q],"reqCount":[1]}}`, unsafePoint), wantErr: cdn.ErrNoSafePoint},

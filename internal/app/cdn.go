@@ -286,12 +286,15 @@ func collectCDNAnalytics(
 	return nil
 }
 
-// Qiniu represents an idle domain as two present-but-empty request-count
-// arrays. Infer the newest complete zero bucket only when it belongs to the
-// date sent in this query; at midnight the preceding bucket is out of scope.
+// Qiniu represents an idle domain with both request-count series empty,
+// either as empty arrays or as an empty data object. Require the two series to
+// have the same presence shape so a partially malformed response still fails.
+// Infer a zero bucket only when it belongs to the date sent in this query; at
+// midnight the preceding bucket is out of scope.
 func idleCDNAnalyticsSnapshot(response cdn.RequestCountResponse, domain string, safeBefore time.Time, queryDate string) (collector.CDNAnalyticsSnapshot, bool, error) {
 	var result collector.CDNAnalyticsSnapshot
-	if response.Data.Points == nil || response.Data.ReqCount == nil || len(response.Data.Points) != 0 || len(response.Data.ReqCount) != 0 {
+	if len(response.Data.Points) != 0 || len(response.Data.ReqCount) != 0 ||
+		(response.Data.Points == nil) != (response.Data.ReqCount == nil) {
 		return result, false, nil
 	}
 	bucketEnd := safeBefore
