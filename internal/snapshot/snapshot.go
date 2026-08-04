@@ -86,6 +86,13 @@ func (s *Store[T]) Publish(data T, meta Meta) {
 	s.value.Store(&value[T]{data: data, meta: meta})
 }
 
+// Clear removes the published snapshot. It is used when discovery changes the
+// resource scope of a whole-account aggregate, so a stale aggregate cannot
+// continue to expose departed resources or totals from the previous scope.
+func (s *Store[T]) Clear() {
+	s.value.Store(nil)
+}
+
 func (s *Store[T]) Load(now time.Time) (data T, meta Meta, ok bool) {
 	v := s.value.Load()
 	if v == nil {

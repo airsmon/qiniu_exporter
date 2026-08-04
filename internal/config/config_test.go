@@ -203,6 +203,17 @@ func TestCDNAdmissionUsesOnlyActiveDomainsForStatisticsBudget(t *testing.T) {
 	}
 }
 
+func TestCDNAdmissionAcceptsValidatedProductionScale(t *testing.T) {
+	cfg := defaults()
+	cfg.CDN.Enabled = true
+	cfg.CDN.StatisticsTimezoneVerified = true
+	cfg.CDN.MonitoringUnitsVerified = true
+
+	if err := cfg.ValidateCDNResourceCounts(290, 290); err != nil {
+		t.Fatalf("290 active CDN domains exceeded the bounded cold-start budget: %v", err)
+	}
+}
+
 func TestDurationAcceptsDays(t *testing.T) {
 	var duration Duration
 	if err := duration.UnmarshalText([]byte("40d")); err != nil {

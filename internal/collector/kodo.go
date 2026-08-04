@@ -31,8 +31,8 @@ func NewKodo(inventory *snapshot.Store[[]kodo.Bucket], store *snapshot.ResourceS
 		),
 		bucketInfo: prometheus.NewDesc(
 			"qiniu_kodo_bucket_info",
-			"Information about a Kodo bucket visible in the latest successful discovery.",
-			[]string{"bucket", "region"}, nil,
+			"Information about a Kodo bucket visible in the latest successful discovery, including its native region ID and access-control state.",
+			[]string{"bucket", "region", "storage_region", "access"}, nil,
 		),
 		storageBytes: prometheus.NewDesc(
 			"qiniu_kodo_storage_bytes",
@@ -71,7 +71,11 @@ func (c *KodoCollector) Collect(ch chan<- prometheus.Metric) {
 	if buckets, _, ok := c.inventory.Load(now); ok {
 		ch <- prometheus.MustNewConstMetric(c.buckets, prometheus.GaugeValue, float64(len(buckets)))
 		for _, bucket := range buckets {
-			ch <- prometheus.MustNewConstMetric(c.bucketInfo, prometheus.GaugeValue, 1, bucket.Name, bucket.Region)
+			access := "public"
+			if bucket.Private {
+				access = "private"
+			}
+			ch <- prometheus.MustNewConstMetric(c.bucketInfo, prometheus.GaugeValue, 1, bucket.Name, bucket.Region, bucket.StorageRegion, access)
 		}
 	}
 	for _, value := range c.store.Load(now) {

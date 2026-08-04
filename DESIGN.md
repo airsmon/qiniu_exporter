@@ -142,18 +142,21 @@ The storage-class mapping is fixed:
 P0 request and traffic statistics are aggregated by bucket without a `storage_class` label, avoiding a sixfold increase in calls for the six `$ftype` values. The MVP does not provide an I/O collector broken down by storage class.
 
 Discovery is all-or-nothing. Sort and deduplicate bucket names, validate each
-returned region, enforce a bounded inventory size, and replace the active
-inventory only after every page passes call-budget admission. If any page,
-validation, or admission check fails, retain the previous complete inventory
-and its snapshots. The v4 listing returns regions directly and avoids an N+1
-per-bucket region lookup.
+returned region and access-control value, enforce a bounded inventory size,
+and replace the active inventory only after every page passes call-budget
+admission. If any page, validation, or admission check fails, retain the
+previous complete inventory and its snapshots. The v4 listing returns the
+native Region ID and `private` state directly, avoiding N+1 per-bucket lookups.
+`storage_region` is a stable English name derived from Qiniu's official
+[region table](https://developer.qiniu.com/kodo/1671/region-endpoint-fq);
+unknown future IDs remain visible as their raw value.
 
 ### 5.2 P0 Metrics
 
 | Metric | Type | Labels | Semantics |
 |---|---|---|---|
 | `qiniu_kodo_buckets` | Gauge | none | Number of buckets in the latest complete discovery snapshot; zero is distinct from unavailable |
-| `qiniu_kodo_bucket_info` | Gauge | `bucket,region` | Constant 1 for each bucket in the latest complete read-only inventory |
+| `qiniu_kodo_bucket_info` | Gauge | `bucket,region,storage_region,access` | Constant 1 for each bucket in the latest complete read-only inventory; `region` is the native Region ID and `access` is `public` or `private` |
 | `qiniu_kodo_storage_bytes` | Gauge | `bucket,region,storage_class` | Storage capacity at the latest complete point |
 | `qiniu_kodo_objects` | Gauge | `bucket,region,storage_class` | Object count at the latest complete point |
 | `qiniu_kodo_requests_per_second` | Gauge | `bucket,region,operation` | Average request rate for the latest complete bucket; `operation` is `get`/`put` |
@@ -176,13 +179,15 @@ Qiniu's CDN APIs use two hosts and two authentication schemes. The exporter call
 | P0 | Resource discovery | `GET https://api.qiniu.com/domain` | Paginated read-only inventory; export CDN product domains and use only `operatingState=success` domains for statistics |
 | P0 | Real-time monitoring bandwidth | `POST /v2/tune/monitoring/bandwidth` | `domains` is a semicolon-delimited string, maximum 50; 5min/hour/day |
 | P0 | Real-time monitoring traffic | `POST /v2/tune/monitoring/flow` | Same as above; monitoring data is retained for 90 days |
+| P0 | Completed-day metering bandwidth | `POST /v2/tune/bandwidth` | Billing-grade bps retained for 180 days; exact current-month peaks use only five-minute points |
+| P0 | Completed-day metering traffic | `POST /v2/tune/flux` | Traffic bytes retained for 180 days; day buckets supply the completed portion of current-month traffic |
 | P0 | Request volume | `POST /v2/tune/loganalyze/reqcount` | `domains` is an array; 5min/1hour/1day |
 | P0 | Status codes | `POST /v2/tune/loganalyze/statuscode` | Returns `codes[statusCode]` time series; preserve response keys and confirm their granularity during the PoC |
 | P0 | Cache hits | `POST /v2/tune/loganalyze/hitmiss` | Returns hit/miss counts and hit/miss traffic; the exporter calculates ratios |
 
 CDN usage APIs accept at most 50 domains per request and preserve the domain dimension in responses, so they can be batched. Although analytics APIs accept up to 100 domains, their response structures do not include a domain dimension. To emit per-domain metrics, the MVP queries only one domain at a time. This aggregation behavior is a mandatory PoC check.
 
-Domains come exclusively from a complete successful discovery result and are sorted and deduplicated before admission. Discovery follows pagination with fixed page and resource limits. All CDN product domains are published in the inventory snapshot, while only domains with `operatingState=success` enter statistics catalogs. A failed refresh retains the previous inventory. When batch monitoring encounters `400032`, use binary splitting to find invalid domains and negative-cache them until the next successful discovery refresh, while marking each as a collection error so one invalid domain cannot freeze the entire batch. Each round permits at most 16 batch attempts for binary splitting; each attempt may call bandwidth and flow at most once. Domains left unresolved when the budget is exhausted fail for that round but are not added to the negative cache, so the next round evaluates them again.
+Domains come exclusively from a complete successful discovery result and are sorted and deduplicated before admission. Discovery follows pagination with fixed page and resource limits. All CDN product domains are published in the inventory snapshot, while only domains with `operatingState=success` enter statistics catalogs. A failed refresh retains the previous inventory. When a batched monitoring or metering call encounters `400032`, use binary splitting to isolate invalid domains. Monitoring negatives are cached until the next successful discovery refresh. Each isolation pass permits at most 16 attempts. Healthy domains can still publish per-domain usage, but account aggregates are omitted and `qiniu_cdn_usage_complete=0` until the whole discovered scope succeeds. Usage has an independent `cdn/usage` health state, so a metering or aggregation failure cannot mark successfully published real-time monitoring samples unhealthy. A discovery scope change clears the whole-account usage snapshot before the new scope is collected.
 
 ### 6.2 P0 Metrics
 
@@ -192,6 +197,12 @@ Domains come exclusively from a complete successful discovery result and are sor
 | `qiniu_cdn_domain_info` | Gauge | `domain,operating_state,product` | Constant 1 for each domain in the latest complete read-only inventory; `operating_state` is the latest management-operation state, not an availability probe |
 | `qiniu_cdn_monitoring_bandwidth_bits_per_second` | Gauge | `domain,region` | Bandwidth in the latest complete monitoring bucket |
 | `qiniu_cdn_monitoring_traffic_bytes_per_second` | Gauge | `domain,region` | Traffic in the latest complete monitoring bucket divided by bucket duration in seconds |
+| `qiniu_cdn_usage_traffic_bytes` | Gauge | `domain,period` | Per-domain traffic for `last_complete_hour`, `today`, or `current_month`; period Gauge resets are expected |
+| `qiniu_cdn_usage_peak_bandwidth_bits_per_second` | Gauge | `domain,period` | Per-domain five-minute peak for `last_complete_hour`, `today`, or `current_month` |
+| `qiniu_cdn_usage_account_traffic_bytes` | Gauge | `period` | Traffic summed across every active domain in the complete discovered account scope for the same three periods |
+| `qiniu_cdn_usage_account_peak_bandwidth_bits_per_second` | Gauge | `period` | Complete-scope account peak calculated by summing all active domains at each aligned five-minute point before selecting the maximum; never sum per-domain peaks |
+| `qiniu_cdn_usage_active_domains` | Gauge | `period` | Domains with non-zero traffic in the reporting period |
+| `qiniu_cdn_usage_complete` | Gauge | `period` | 1 when the period includes every active domain in the latest discovery scope, otherwise 0; incomplete account totals are omitted |
 | `qiniu_cdn_requests_per_second` | Gauge | `domain,region` | Average RPS in the latest complete `reqcount` bucket |
 | `qiniu_cdn_http_responses_per_second` | Gauge | `domain,region,code` | Average response rate by status code; preserve the validated `code` value returned by the API without assuming that it is necessarily a category or an exact code |
 | `qiniu_cdn_cache_requests_per_second` | Gauge | `domain,result` | Hit/miss request count divided by bucket duration in seconds; `result` is `hit`/`miss` |
@@ -199,7 +210,7 @@ Domains come exclusively from a complete successful discovery result and are sor
 | `qiniu_cdn_cache_request_hit_ratio` | Gauge | `domain` | `hit / (hit + miss)`, range 0-1 |
 | `qiniu_cdn_cache_traffic_hit_ratio` | Gauge | `domain` | `trafficHit / (trafficHit + trafficMiss)`, range 0-1 |
 
-The monitoring bandwidth/flow documentation does not restate the response units. Although they are expected to remain bps/bytes, verify them against the console and real responses before enabling the unit-bearing metrics above. The `cdn.monitoring_units_verified` setting defaults to `false`. When units are unverified, do not call these two endpoints; record a scheduling skip with `reason="units_unverified"`, do not create a permanent failure state, and do not publish unit-dependent business samples. Set the option to `true` only after confirming that bandwidth is in bit/s and traffic is the number of bytes in a five-minute bucket. All CDN collection is also subject to the `statistics_timezone_verified` gate.
+The monitoring bandwidth/flow documentation does not restate the response units. Verify them against the console and real responses before enabling the unit-bearing metrics above. The `cdn.monitoring_units_verified` setting defaults to `false`. When units are unverified, do not call these endpoints; record a scheduling skip with `reason="units_unverified"`, do not create a permanent failure state, and do not publish unit-dependent business samples. Set the option to `true` only after confirming that bandwidth is in bit/s and traffic is bytes per five-minute bucket. The metering APIs explicitly define bps and bytes. There is no native month granularity, and Qiniu does not define whether hour/day bandwidth buckets are maxima or averages. Therefore exact monthly peaks use only five-minute `/v2/tune/bandwidth` points. Cold start backfills completed days in at most three-day windows, validates a common grid across all domain batches, reduces each window to compact peaks, and caches the completed boundary in memory. Later rounds normally fetch only a newly completed day and merge today's already-fetched monitoring points. All CDN collection is also subject to the `statistics_timezone_verified` gate.
 
 ### 6.3 CDN Operational Gaps
 
@@ -315,9 +326,9 @@ Normal collection requests pass through the attempt-0 limiter and may use at mos
 
 - Use a stable phase for each scheduled dataset by hashing its phase key modulo the interval, avoiding a synchronized fan-out at every five-minute boundary. Add only a small random jitter. Each resource-oriented run then processes the current discovered inventory in a bounded serial loop.
 - Each task runs in one serial loop. A new run of the same task cannot overlap a previous run, and there is no unbounded pending queue. Stable phases, independent context deadlines, and layered limiters jointly control contention. The MVP does not implement a central priority queue that would introduce additional state.
-- CDN monitoring bandwidth/flow batches contain at most 50 domains. When an analytics response has no domain dimension, query one domain at a time; never incorrectly distribute an aggregate back across individual domains.
+- CDN monitoring bandwidth/flow and both metering datasets contain at most 50 domains. Hour/today aggregates reuse the already-fetched monitoring response. Completed-month traffic uses small day buckets. Exact monthly bandwidth uses bounded three-day five-minute windows only for uncached completed dates. When an analytics response has no domain dimension, query one domain at a time; never incorrectly distribute an aggregate back across individual domains.
 - Kodo `/v6/*` responses are not grouped by bucket, so per-bucket metrics necessarily fan out. Query only the successfully discovered inventory and storage classes that are actually enabled.
-- Query windows cover only the minimum range required to select the latest complete point. When CDN query parameters support only date granularity, cover the current day. Do not scan history during cold start. There is only one scheduled task for a given `dataset + resource`; do not issue another request for the same window while the previous run is incomplete.
+- Query windows cover only the minimum range required for each result. Latest monitoring covers today plus enough of the preceding hour to tolerate one lagging batch. Current-month traffic reads completed day buckets. Monthly bandwidth cold start may backfill the current month's completed dates, but splits them into at most three-day windows and keeps only compact peak aggregates; later rounds reuse the in-memory completed-day cache. There is only one scheduled task for a given `dataset + resource`; do not issue another request for the same window while the previous run is incomplete.
 - `/metrics` never accesses upstream services. Poll Kodo/CDN, balance, and daily/finalized billing data on their documented schedules. Successful snapshots survive failed rounds and remain exportable only until their configured `stale_after` duration expires.
 - Negative-cache invalid `400032` domains until the next successful discovery refresh so they are not retried every round. Continue exposing collection failure for each affected resource.
 
@@ -328,7 +339,7 @@ Normal collection requests pass through the attempt-0 limiter and may use at mos
 | Kodo/CDN resource discovery | 60 minutes (`collection.intervals.discovery`) | Schedule immediately without blocking the HTTP server; publish a complete inventory snapshot, start empty after an initial failure, and retain the previous complete inventory after later failed refreshes while reporting discovery health and age |
 | Kodo capacity/object count | 30 minutes (`collection.intervals.kodo_capacity`) | Run at the dataset's first stable phase |
 | Kodo GET/PUT/egress | 30 minutes (`collection.intervals.kodo_activity`) | Run at the first stable phase and read only the latest safe five-minute bucket |
-| CDN monitoring | 30 minutes (`collection.intervals.cdn_monitoring`) | Run at the dataset's first stable phase over discovered domains |
+| CDN monitoring and period usage | 30 minutes (`collection.intervals.cdn_monitoring`) | Run at the dataset's first stable phase over discovered domains; reuse current-day points, fetch completed current-month traffic by day, and incrementally cache exact five-minute monthly bandwidth peaks |
 | CDN analytics | 30 minutes (`collection.intervals.cdn_analytics`) | Run at the dataset's first stable phase over discovered domains |
 | Billing balance | 60 minutes | Collect immediately after startup |
 | Billing estimate | Daily at 08:15 | Run at startup when a safe snapshot date exists; on the morning of the first day of each month, wait until 08:15 |
@@ -342,7 +353,7 @@ After the initial stable phase, fixed-interval tasks add approximately +/-10% ra
 Before accepting each refreshed inventory, calculate demand from the discovered resource count and configured intervals. A rejected initial inventory leaves the exporter running with an empty resource set and a failed discovery self-metric; a rejected later refresh retains the previous complete set:
 
 - The conservative Kodo first-attempt demand is `ceil(B/100)/T_discovery + B × (4/T_activity + 2×S/T_capacity)` QPS, where `B` is the discovered bucket count, `S` is the enabled storage-class count, `T_discovery=min(5m, I_discovery/2)`, and each statistics timeout `T` is 80% of its configured interval. Omit the statistics terms until the timezone gate passes, but always budget the paginated discovery calls because they share the Kodo limiter. Reject inventories above 200 buckets.
-- Reject discovery responses containing more than 2,000 CDN product domains. For statistics admission, the conservative CDN fusion demand is `2×ceil(A/50)/T_monitoring + 3×A/T_analytics` QPS, where `A` is the subset with `operatingState=success` and each `T` is 80% of its configured interval. Error isolation is excluded from admission but remains subject to the same attempt-0 limiter and the per-round limit of 16 batch attempts. When `monitoring_units_verified=false`, do not call the two monitoring endpoints and omit the first term. Do not send CDN statistics requests until the timezone gate passes; read-only discovery and inventory publication remain enabled.
+- Reject discovery responses containing more than 2,000 CDN product domains. Statistics admission includes `3×A/T_analytics` plus a bounded cold-start worst case of `208×ceil(A/50)/T_monitoring`, where `A` is the `operatingState=success` subset and each `T` is 80% of its interval. The batched bound covers two calls across 16 monitoring-isolation attempts, one completed-traffic call across 16 attempts, and at most ten three-day bandwidth windows with 16 attempts each. Normal cached rounds are far smaller. Every request still passes the shared 5 QPS Fusion limiter. When `monitoring_units_verified=false`, omit the batched term and make no usage calls. Do not send CDN statistics requests until the timezone gate passes; read-only discovery and inventory publication remain enabled.
 - Steady-state billing call volume is low. Balance, daily APIs, current-year finalized-month backfill, and complete pagination remain subject to 1 QPS, burst 1, and concurrency 1. A finalized history cold start uses at most 11 distinct sequential monthly operations; each operation retains the existing maximum of two retries and the one-minute job deadline. Later runs request only missing months. Do not paginate when the resource-pack allowlist is empty.
 
 If estimated demand exceeds the configured first-attempt budget, reject that inventory with an explicit discovery error. Resolve this by increasing the corresponding collection interval, reducing enabled storage classes, disabling an unneeded module, or restricting the credential's resource scope. Higher protection ceilings require a reviewed code change and, where applicable, a higher Qiniu quota. Do not scale horizontally with multiple instances for the same account. If multiple instances are unavoidable, use a shared external distributed limiter and keep their aggregate budget within the account quota.
@@ -513,7 +524,7 @@ Status: implemented.
 
 ## 16. Key Corrections from the Original Handoff
 
-1. Although the official Go SDK wraps basic CDN metering and logging capabilities, they are outside the current core scope. The MVP implements only fixed read-only REST clients for monitoring/analytics.
+1. Although the official Go SDK wraps basic CDN metering and logging capabilities, the exporter keeps its fixed HTTPS/QBox client so every permitted endpoint shares the same allowlist, limiter, retry, and telemetry path. Completed-day metering flow and exact five-minute metering bandwidth are scheduled in addition to monitoring/analytics.
 2. Kodo capacity/object counts for each storage class use distinct `/v6/space*` and `/v6/count*` endpoints, not one `/v6/count` endpoint with a universal `storage_type` parameter.
 3. Use `bill/detail.total_money` for the monthly total. `bill/overview` is an entry overview and must not be treated as the monthly total.
 4. Billing also provides the `bill/snapshot` daily-estimate endpoint, which is a core data source for operational cost monitoring.

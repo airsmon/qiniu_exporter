@@ -20,6 +20,32 @@ func TestClientUsesOnlyFixedP0EndpointsAndBodies(t *testing.T) {
 		call     func(context.Context, *Client) error
 	}{
 		{
+			name: "metering bandwidth",
+			path: meteringBandwidthPath,
+			wantBody: map[string]any{
+				"domains": "a.example.com;b.example.com", "startDate": "2026-02-01",
+				"endDate": "2026-02-10", "granularity": "5min",
+			},
+			response: `{"code":200,"error":"","time":[],"data":{}}`,
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.FetchMeteringBandwidth(ctx, meteringTestQuery(GranularityFiveMinutes))
+				return err
+			},
+		},
+		{
+			name: "metering flux",
+			path: meteringFluxPath,
+			wantBody: map[string]any{
+				"domains": "a.example.com;b.example.com", "startDate": "2026-02-01",
+				"endDate": "2026-02-10", "granularity": "day",
+			},
+			response: `{"code":200,"error":"","time":[],"data":{}}`,
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.FetchMeteringFlux(ctx, meteringTestQuery(GranularityDay))
+				return err
+			},
+		},
+		{
 			name: "monitoring bandwidth",
 			path: monitoringBandwidthPath,
 			wantBody: map[string]any{
@@ -142,6 +168,58 @@ func TestClientRejectsMoreThanFiftyMonitoringDomainsBeforeRequest(t *testing.T) 
 	}
 }
 
+func TestClientRejectsInvalidMeteringQueriesBeforeRequest(t *testing.T) {
+	doer := doerFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("Do must not be called")
+		return nil, nil
+	})
+	client, err := NewClient(doer, "")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		query MeteringQuery
+	}{
+		{name: "missing granularity", query: meteringTestQuery("")},
+		{name: "invalid granularity", query: meteringTestQuery("month")},
+		{name: "end before start", query: MeteringQuery{
+			Domains: []string{"a.example.com"}, StartDate: "2026-02-10", EndDate: "2026-02-09", Granularity: GranularityDay,
+		}},
+		{name: "range over 31 days", query: MeteringQuery{
+			Domains: []string{"a.example.com"}, StartDate: "2026-01-01", EndDate: "2026-02-01", Granularity: GranularityDay,
+		}},
+	}
+	tooMany := meteringTestQuery(GranularityDay)
+	tooMany.Domains = make([]string, 51)
+	for index := range tooMany.Domains {
+		tooMany.Domains[index] = "domain-" + strings.Repeat("x", index+1) + ".example.com"
+	}
+	tests = append(tests, struct {
+		name  string
+		query MeteringQuery
+	}{name: "more than fifty domains", query: tooMany})
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := client.FetchMeteringFlux(context.Background(), test.query)
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("error = %v, want ErrInvalidInput", err)
+			}
+		})
+	}
+}
+
+func TestValidateDateRangeCountsInclusiveCalendarDays(t *testing.T) {
+	if err := validateDateRange("2026-01-01", "2026-01-31", 31); err != nil {
+		t.Fatalf("31 inclusive days were rejected: %v", err)
+	}
+	if err := validateDateRange("2026-01-01", "2026-02-01", 31); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("32 inclusive days error=%v, want ErrInvalidInput", err)
+	}
+}
+
 func TestClientReturnsBusinessCodeError(t *testing.T) {
 	doer := doerFunc(func(*http.Request) (*http.Response, error) {
 		return jsonResponse(http.StatusOK, `{"code":400032,"error":"invalid domain","data":{}}`), nil
@@ -169,6 +247,8 @@ func TestClientReturnsBusinessCodeError(t *testing.T) {
 
 func TestClientDecodesOfficialResponseShapes(t *testing.T) {
 	responses := map[string]string{
+		meteringBandwidthPath:   `{"code":200,"error":"","time":["2026-02-10 00:00:00"],"data":{"a.example.com":{"china":[123],"oversea":[45]}}}`,
+		meteringFluxPath:        `{"code":200,"error":"","time":["2026-02-10 00:00:00"],"data":{"a.example.com":{"china":[456],"oversea":[78]}}}`,
 		monitoringBandwidthPath: `{"code":200,"error":"","time":["2026-02-10 10:00:00"],"data":{"a.example.com":{"china":[123],"oversea":[45]}}}`,
 		requestCountPath:        `{"code":200,"error":"","data":{"points":["2026-02-10-10-00"],"reqCount":[300]}}`,
 		statusCodePath:          `{"code":200,"error":"","data":{"points":["2026-02-10-10-00"],"codes":{"2xx":[299],"404":[1]}}}`,
@@ -190,6 +270,26 @@ func TestClientDecodesOfficialResponseShapes(t *testing.T) {
 	}
 	if len(monitoring.Times) != 1 || len(monitoring.Data["a.example.com"].China) != 1 || monitoring.Times[0] != "2026-02-10 10:00:00" || monitoring.Data["a.example.com"].China[0] != 123 {
 		t.Fatalf("monitoring response = %#v, error = %v", monitoring, err)
+	}
+
+	meteringBandwidth, err := client.FetchMeteringBandwidth(context.Background(), MeteringQuery{
+		Domains: []string{"a.example.com"}, StartDate: "2026-02-10", EndDate: "2026-02-10", Granularity: GranularityFiveMinutes,
+	})
+	if err != nil {
+		t.Fatalf("FetchMeteringBandwidth: %v", err)
+	}
+	if len(meteringBandwidth.Times) != 1 || meteringBandwidth.Data["a.example.com"].China[0] != 123 {
+		t.Fatalf("metering bandwidth response = %#v, error = %v", meteringBandwidth, err)
+	}
+
+	metering, err := client.FetchMeteringFlux(context.Background(), MeteringQuery{
+		Domains: []string{"a.example.com"}, StartDate: "2026-02-10", EndDate: "2026-02-10", Granularity: GranularityDay,
+	})
+	if err != nil {
+		t.Fatalf("FetchMeteringFlux: %v", err)
+	}
+	if len(metering.Times) != 1 || metering.Times[0] != "2026-02-10 00:00:00" || metering.Data["a.example.com"].China[0] != 456 {
+		t.Fatalf("metering response = %#v, error = %v", metering, err)
 	}
 
 	requests, err := client.FetchRequestCount(context.Background(), regionalTestQuery())
@@ -238,6 +338,15 @@ func monitoringTestQuery() MonitoringQuery {
 		Domains:   []string{"a.example.com", "b.example.com"},
 		StartDate: "2026-02-10",
 		EndDate:   "2026-02-10",
+	}
+}
+
+func meteringTestQuery(granularity Granularity) MeteringQuery {
+	return MeteringQuery{
+		Domains:     []string{"a.example.com", "b.example.com"},
+		StartDate:   "2026-02-01",
+		EndDate:     "2026-02-10",
+		Granularity: granularity,
 	}
 }
 

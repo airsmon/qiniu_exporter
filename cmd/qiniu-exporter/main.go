@@ -180,6 +180,7 @@ func run(configPath string, logger *slog.Logger) error {
 			Inventory:  &snapshot.Store[[]cdn.Domain]{},
 			Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 			Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
+			Usage:      &snapshot.Store[collector.CDNUsageSnapshot]{},
 		}
 		registry.MustRegister(collector.NewCDN(stores))
 		if !cfg.CDN.StatisticsTimezoneVerified {
@@ -323,6 +324,8 @@ func kodoDiscoveryPolicy() authhttp.Policy {
 
 func cdnPolicy() authhttp.Policy {
 	return authhttp.Policy{Host: "fusion.qiniuapi.com", Endpoints: []authhttp.Endpoint{
+		{Method: http.MethodPost, Path: "/v2/tune/bandwidth", Name: "metering_bandwidth"},
+		{Method: http.MethodPost, Path: "/v2/tune/flux", Name: "metering_flux"},
 		{Method: http.MethodPost, Path: "/v2/tune/monitoring/bandwidth", Name: "monitoring_bandwidth"},
 		{Method: http.MethodPost, Path: "/v2/tune/monitoring/flow", Name: "monitoring_flow"},
 		{Method: http.MethodPost, Path: "/v2/tune/loganalyze/reqcount", Name: "request_count"},

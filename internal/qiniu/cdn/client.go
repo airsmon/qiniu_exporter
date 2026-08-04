@@ -16,14 +16,16 @@ import (
 const (
 	DefaultBaseURL = "https://fusion.qiniuapi.com"
 
+	meteringBandwidthPath   = "/v2/tune/bandwidth"
+	meteringFluxPath        = "/v2/tune/flux"
 	monitoringBandwidthPath = "/v2/tune/monitoring/bandwidth"
 	monitoringFlowPath      = "/v2/tune/monitoring/flow"
 	requestCountPath        = "/v2/tune/loganalyze/reqcount"
 	statusCodePath          = "/v2/tune/loganalyze/statuscode"
 	hitMissPath             = "/v2/tune/loganalyze/hitmiss"
 
-	maxMonitoringDomains = 50
-	maxResponseBytes     = 16 << 20
+	maxUsageDomains  = 50
+	maxResponseBytes = 16 << 20
 )
 
 var (
@@ -42,7 +44,7 @@ type Client struct {
 	baseURL string
 }
 
-// NewClient creates a client that can call only the five CDN P0 statistics
+// NewClient creates a client that can call only the seven CDN P0 statistics
 // endpoints in this package. An empty baseURL selects DefaultBaseURL.
 func NewClient(doer Doer, baseURL string) (*Client, error) {
 	if doer == nil {
@@ -72,6 +74,15 @@ type MonitoringQuery struct {
 	EndDate   string
 }
 
+// MeteringQuery selects billing-grade CDN traffic buckets.
+// Granularity is explicit even though Qiniu defaults an omitted value to 5min.
+type MeteringQuery struct {
+	Domains     []string
+	StartDate   string
+	EndDate     string
+	Granularity Granularity
+}
+
 type DomainQuery struct {
 	Domain    string
 	StartDate string
@@ -96,6 +107,11 @@ type MonitoringRegionSeries struct {
 	China   []float64 `json:"china"`
 	Oversea []float64 `json:"oversea"`
 }
+
+// UsageResponse and UsageRegionSeries name the response shared by metering
+// and monitoring endpoints without breaking the existing monitoring API.
+type UsageResponse = MonitoringResponse
+type UsageRegionSeries = MonitoringRegionSeries
 
 type RequestCountResponse struct {
 	Code  int              `json:"code"`
@@ -164,6 +180,14 @@ func (c *Client) FetchMonitoringBandwidth(ctx context.Context, query MonitoringQ
 
 func (c *Client) FetchMonitoringFlow(ctx context.Context, query MonitoringQuery) (MonitoringResponse, error) {
 	return c.fetchMonitoring(ctx, monitoringFlowPath, query)
+}
+
+func (c *Client) FetchMeteringFlux(ctx context.Context, query MeteringQuery) (UsageResponse, error) {
+	return c.fetchMetering(ctx, meteringFluxPath, query)
+}
+
+func (c *Client) FetchMeteringBandwidth(ctx context.Context, query MeteringQuery) (UsageResponse, error) {
+	return c.fetchMetering(ctx, meteringBandwidthPath, query)
 }
 
 func (c *Client) FetchRequestCount(ctx context.Context, query RegionalDomainQuery) (RequestCountResponse, error) {
@@ -258,6 +282,23 @@ func (c *Client) fetchMonitoring(ctx context.Context, path string, query Monitor
 	return result, checkBusinessCode(result.Code, result.Error)
 }
 
+func (c *Client) fetchMetering(ctx context.Context, path string, query MeteringQuery) (UsageResponse, error) {
+	var result UsageResponse
+	if err := validateMeteringQuery(query); err != nil {
+		return result, err
+	}
+	payload := monitoringRequest{
+		Domains:     strings.Join(query.Domains, ";"),
+		StartDate:   query.StartDate,
+		EndDate:     query.EndDate,
+		Granularity: query.Granularity.String(),
+	}
+	if err := c.postJSON(ctx, path, payload, &result); err != nil {
+		return result, err
+	}
+	return result, checkBusinessCode(result.Code, result.Error)
+}
+
 func (c *Client) postJSON(ctx context.Context, path string, payload, result any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -313,11 +354,28 @@ func checkBusinessCode(code int, message string) error {
 }
 
 func validateMonitoringQuery(query MonitoringQuery) error {
-	if len(query.Domains) == 0 || len(query.Domains) > maxMonitoringDomains {
-		return fmt.Errorf("%w: monitoring domains must contain 1 to %d entries", ErrInvalidInput, maxMonitoringDomains)
+	if err := validateUsageDomains(query.Domains); err != nil {
+		return err
 	}
-	seen := make(map[string]struct{}, len(query.Domains))
-	for _, domain := range query.Domains {
+	return validateDateRange(query.StartDate, query.EndDate, 31)
+}
+
+func validateMeteringQuery(query MeteringQuery) error {
+	if err := validateUsageDomains(query.Domains); err != nil {
+		return err
+	}
+	if !query.Granularity.Valid() {
+		return fmt.Errorf("%w: invalid metering granularity", ErrInvalidInput)
+	}
+	return validateDateRange(query.StartDate, query.EndDate, 31)
+}
+
+func validateUsageDomains(domains []string) error {
+	if len(domains) == 0 || len(domains) > maxUsageDomains {
+		return fmt.Errorf("%w: usage domains must contain 1 to %d entries", ErrInvalidInput, maxUsageDomains)
+	}
+	seen := make(map[string]struct{}, len(domains))
+	for _, domain := range domains {
 		if err := validateDomain(domain, true); err != nil {
 			return err
 		}
@@ -326,7 +384,7 @@ func validateMonitoringQuery(query MonitoringQuery) error {
 		}
 		seen[domain] = struct{}{}
 	}
-	return validateDateRange(query.StartDate, query.EndDate, 31)
+	return nil
 }
 
 func validateDomainQuery(query DomainQuery) error {
@@ -356,7 +414,7 @@ func validateDomain(domain string, rejectSemicolon bool) error {
 	return nil
 }
 
-func validateDateRange(startText, endText string, maxSpanDays int) error {
+func validateDateRange(startText, endText string, maxInclusiveDays int) error {
 	const dateLayout = "2006-01-02"
 	start, err := time.Parse(dateLayout, startText)
 	if err != nil || start.Format(dateLayout) != startText {
@@ -369,8 +427,10 @@ func validateDateRange(startText, endText string, maxSpanDays int) error {
 	if end.Before(start) {
 		return fmt.Errorf("%w: endDate precedes startDate", ErrInvalidInput)
 	}
-	if end.Sub(start) > time.Duration(maxSpanDays)*24*time.Hour {
-		return fmt.Errorf("%w: date range exceeds %d days", ErrInvalidInput, maxSpanDays)
+	// startDate and endDate are both included by Qiniu. A 31-day request can
+	// therefore have at most 30 midnights between its endpoints.
+	if end.Sub(start) >= time.Duration(maxInclusiveDays)*24*time.Hour {
+		return fmt.Errorf("%w: date range exceeds %d inclusive days", ErrInvalidInput, maxInclusiveDays)
 	}
 	return nil
 }

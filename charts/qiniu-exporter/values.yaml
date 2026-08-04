@@ -5,7 +5,8 @@ replicaCount: 1
 image:
   repository: ghcr.io/airsmon/qiniu_exporter
   pullPolicy: IfNotPresent
-  # Defaults to Chart.appVersion when empty.
+  # Defaults to Chart.appVersion (the CI-published main tag for this chart).
+  # Override with an immutable release tag or digest in production.
   tag: ""
   # A digest takes precedence over tag when set.
   digest: ""

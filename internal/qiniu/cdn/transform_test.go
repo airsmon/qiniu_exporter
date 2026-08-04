@@ -48,6 +48,58 @@ func TestSelectLatestSafeMonitoringFiveMinuteSamples(t *testing.T) {
 	}
 }
 
+func TestSelectLatestSafeMonitoringTreatsOmittedRequestedDomainAsZero(t *testing.T) {
+	response := MonitoringResponse{
+		Code:  200,
+		Times: []string{"2026-02-10 10:00:00"},
+		Data: map[string]MonitoringRegionSeries{
+			"active.example.com": {China: []float64{300}, Oversea: []float64{0}},
+		},
+	}
+	domains := []string{"active.example.com", "idle.example.com"}
+	bandwidth, err := SelectLatestSafeBandwidth5Min(response, domains, bucketTimeUTC(10, 5), time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bandwidth) != 4 || bandwidth[2].Domain != "idle.example.com" || bandwidth[2].BitsPerSecond != 0 || bandwidth[3].BitsPerSecond != 0 {
+		t.Fatalf("bandwidth=%#v, want explicit zero samples for omitted requested domain", bandwidth)
+	}
+	traffic, err := SelectLatestSafeTraffic5Min(response, domains, bucketTimeUTC(10, 5), time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if traffic[2].BytesPerSecond != 0 || traffic[3].BytesPerSecond != 0 {
+		t.Fatalf("traffic=%#v, want explicit zero samples for omitted requested domain", traffic)
+	}
+}
+
+func TestSelectLatestSafeMonitoringTreatsEmptyRegionSeriesAsZero(t *testing.T) {
+	response := MonitoringResponse{
+		Code:  200,
+		Times: []string{"2026-02-10 10:00:00", "2026-02-10 10:05:00"},
+		Data: map[string]MonitoringRegionSeries{
+			"a.example.com": {China: []float64{300, 600}, Oversea: []float64{}},
+		},
+	}
+	domains := []string{"a.example.com"}
+
+	bandwidth, err := SelectLatestSafeBandwidth5Min(response, domains, bucketTimeUTC(10, 10), time.UTC)
+	if err != nil {
+		t.Fatalf("SelectLatestSafeBandwidth5Min: %v", err)
+	}
+	if bandwidth[0].BitsPerSecond != 600 || bandwidth[1].BitsPerSecond != 0 {
+		t.Fatalf("bandwidth = %#v, want china=600 and oversea=0", bandwidth)
+	}
+
+	traffic, err := SelectLatestSafeTraffic5Min(response, domains, bucketTimeUTC(10, 10), time.UTC)
+	if err != nil {
+		t.Fatalf("SelectLatestSafeTraffic5Min: %v", err)
+	}
+	if traffic[0].BytesPerSecond != 2 || traffic[1].BytesPerSecond != 0 {
+		t.Fatalf("traffic = %#v, want china=2 B/s and oversea=0", traffic)
+	}
+}
+
 func TestSelectLatestSafeRequestRateFiveMinutes(t *testing.T) {
 	location := time.UTC
 	response := RequestCountResponse{

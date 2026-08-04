@@ -11,8 +11,10 @@ API rate limiting, Kodo, CDN, and Billing metrics.
 3. Map `DS_PROMETHEUS` to the Prometheus data source that scrapes
    `qiniu_exporter`.
 4. Select the single `qiniu_account` value first, then use `job`, `instance`,
-   `bucket`, `domain`, `region`, `storage_class`, and `currency` to narrow the
-   dashboard.
+   `bucket`, `kodo_region`, `domain`, `cdn_region`, `storage_class`, and
+   `currency` to narrow the dashboard. Kodo Region IDs and CDN traffic regions
+   are intentionally separate filters because their label values describe
+   different products.
 
 The dashboard requires a non-sensitive `qiniu_account` Prometheus target label
 on every exporter target. Use a stable alias such as `production`; never use an
@@ -27,9 +29,21 @@ CDN statistics panels are expected to have no data while their timezone or unit
 gate is active. Their dedicated inventory panels still show automatically
 discovered bucket/domain counts, names, regions, products, and bounded domain
 operating states. A CDN operating state is the latest Qiniu domain-management
-operation state, not an availability probe. Known native Kodo region IDs are
-shown with readable names while retaining the raw ID, and CDN operating states
-use semantic color blocks in both the summary and inventory table.
+operation state, not an availability probe. Kodo Storage Region and Region ID
+are separate columns, unknown future Region IDs remain visible, and Access
+Control is rendered as a colored Public/Private cell. CDN operating states use
+semantic color blocks in both the summary and inventory table.
+
+CDN usage cards are upstream period snapshots, not Prometheus estimates. The
+dashboard shows last-complete-hour and today traffic/peak bandwidth,
+current-month traffic and peak bandwidth, observed active domains, and
+per-domain Top 5 views.
+Current-month traffic combines completed metering days with today's complete
+five-minute buckets. Monthly peak bandwidth is calculated only from exact
+five-minute points; completed billing-grade days are fetched in bounded
+three-day windows and cached, then merged with today's complete monitoring
+points. The bandwidth Top 5 panel follows the domains selected by monthly
+traffic, matching the Qiniu overview's table scope.
 
 Resource-pack quantities include a `unit` label and must not be aggregated
 across different units. The resource-pack status panel distinguishes an empty

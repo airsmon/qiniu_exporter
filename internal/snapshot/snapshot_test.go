@@ -20,6 +20,18 @@ func TestStoreExpiresWithoutDestroyingLastValue(t *testing.T) {
 	}
 }
 
+func TestStoreClearRemovesPublishedValue(t *testing.T) {
+	var store Store[string]
+	store.Publish("value", Meta{CollectedAt: time.Now()})
+	store.Clear()
+	if store.HasValue() {
+		t.Fatal("cleared store retained its published value")
+	}
+	if _, _, ok := store.Load(time.Now()); ok {
+		t.Fatal("cleared store returned a value")
+	}
+}
+
 func TestResourceStoreExpiresIndependently(t *testing.T) {
 	var store ResourceStore[int]
 	now := time.Unix(1000, 0)

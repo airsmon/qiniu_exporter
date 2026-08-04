@@ -51,7 +51,10 @@ func (d *retryingKodoDiscoverer) ListBuckets(context.Context) ([]kodo.Bucket, er
 	if d.listCalls == 1 {
 		return nil, d.firstError
 	}
-	return []kodo.Bucket{{Name: "bucket", Region: "z0"}, {Name: "bucket", Region: "z1"}}, nil
+	return []kodo.Bucket{
+		{Name: "bucket", Region: "z0", StorageRegion: "East China - Zhejiang", Private: false},
+		{Name: "bucket", Region: "z1", StorageRegion: "North China - Hebei", Private: true},
+	}, nil
 }
 
 type retryingCDNDiscoverer struct {
@@ -136,6 +139,7 @@ func TestCDNStartupDiscoveryFailureIsNonfatalAndRetried(t *testing.T) {
 		Inventory:  &snapshot.Store[[]cdn.Domain]{},
 		Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
+		Usage:      &snapshot.Store[collector.CDNUsageSnapshot]{},
 	}
 
 	if err := RegisterCDN(scheduler, nil, discoverer, cfg, stores, metrics); err != nil {
@@ -201,7 +205,9 @@ func TestKodoInventoryIsPublishedWhileStatisticsAreGated(t *testing.T) {
 		t.Fatalf("Kodo discovery error = %v", result.err)
 	}
 	assertAppGauge(t, registry, "qiniu_kodo_buckets", nil, 2)
-	assertAppGauge(t, registry, "qiniu_kodo_bucket_info", map[string]string{"bucket": "bucket", "region": "z0"}, 1)
+	assertAppGauge(t, registry, "qiniu_kodo_bucket_info", map[string]string{
+		"bucket": "bucket", "region": "z0", "storage_region": "East China - Zhejiang", "access": "public",
+	}, 1)
 	assertMetricFamilyAbsent(t, registry, "qiniu_kodo_storage_bytes")
 }
 
@@ -222,6 +228,7 @@ func TestCDNInventoryIncludesInactiveDomainsWhileStatisticsAreGated(t *testing.T
 		Inventory:  &snapshot.Store[[]cdn.Domain]{},
 		Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
+		Usage:      &snapshot.Store[collector.CDNUsageSnapshot]{},
 	}
 	registry.MustRegister(collector.NewCDN(stores))
 

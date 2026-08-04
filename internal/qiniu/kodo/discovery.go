@@ -23,10 +23,25 @@ const (
 	maxBucketDiscoveryMarker = 4096
 )
 
-// Bucket identifies one Kodo bucket and its storage region.
+// Bucket identifies one Kodo bucket and its read-only inventory metadata.
 type Bucket struct {
-	Name   string `json:"name"`
-	Region string `json:"region"`
+	Name          string
+	Region        string
+	StorageRegion string
+	Private       bool
+}
+
+// storageRegionNames follows Qiniu's public Kodo region table. Unknown future
+// IDs deliberately fall back to their raw value instead of disappearing.
+var storageRegionNames = map[string]string{
+	"z0":             "East China - Zhejiang",
+	"cn-east-2":      "East China - Zhejiang 2",
+	"z1":             "North China - Hebei",
+	"z2":             "South China - Guangdong",
+	"na0":            "North America - Los Angeles",
+	"as0":            "Asia Pacific - Singapore",
+	"ap-southeast-2": "Asia Pacific - Hanoi",
+	"ap-southeast-3": "Asia Pacific - Ho Chi Minh City",
 }
 
 // DiscoveryClient calls only Qiniu's read-only paginated bucket-list API.
@@ -59,9 +74,9 @@ func NewDiscoveryClient(doer Doer, baseURL string) (*DiscoveryClient, error) {
 	return &DiscoveryClient{doer: doer, baseURL: parsed}, nil
 }
 
-// ListBuckets returns every visible bucket and region. It uses the same v4
-// paginated listing API as the official Qiniu Go SDK, avoiding a per-bucket
-// region lookup.
+// ListBuckets returns every visible bucket with its region and access state. It
+// uses the same v4 paginated listing API as the official Qiniu Go SDK, avoiding
+// per-bucket metadata lookups.
 func (c *DiscoveryClient) ListBuckets(ctx context.Context) ([]Bucket, error) {
 	buckets := make([]Bucket, 0)
 	seenBuckets := make(map[string]struct{})
@@ -89,15 +104,23 @@ func (c *DiscoveryClient) ListBuckets(ctx context.Context) ([]Bucket, error) {
 		if len(buckets)+len(page.Buckets) > maxDiscoveredBuckets {
 			return nil, fmt.Errorf("%w: bucket discovery exceeds %d resources", ErrUnexpectedResponse, maxDiscoveredBuckets)
 		}
-		for index, bucket := range page.Buckets {
-			if !validResourceIdentifier(bucket.Name) || !validResourceIdentifier(bucket.Region) {
+		for index, discovered := range page.Buckets {
+			if !validResourceIdentifier(discovered.Name) || !validResourceIdentifier(discovered.Region) {
 				return nil, fmt.Errorf("%w: bucket %d has an invalid name or region", ErrUnexpectedResponse, index)
 			}
-			if _, exists := seenBuckets[bucket.Name]; exists {
-				return nil, fmt.Errorf("%w: bucket discovery contains duplicate bucket %q", ErrUnexpectedResponse, bucket.Name)
+			if discovered.Private == nil {
+				return nil, fmt.Errorf("%w: bucket %d is missing its access-control state", ErrUnexpectedResponse, index)
 			}
-			seenBuckets[bucket.Name] = struct{}{}
-			buckets = append(buckets, bucket)
+			if _, exists := seenBuckets[discovered.Name]; exists {
+				return nil, fmt.Errorf("%w: bucket discovery contains duplicate bucket %q", ErrUnexpectedResponse, discovered.Name)
+			}
+			seenBuckets[discovered.Name] = struct{}{}
+			buckets = append(buckets, Bucket{
+				Name:          discovered.Name,
+				Region:        discovered.Region,
+				StorageRegion: storageRegionName(discovered.Region),
+				Private:       *discovered.Private,
+			})
 		}
 
 		if !*page.IsTruncated {
@@ -127,9 +150,22 @@ func (c *DiscoveryClient) ListBuckets(ctx context.Context) ([]Bucket, error) {
 }
 
 type bucketDiscoveryPage struct {
-	NextMarker  string   `json:"next_marker"`
-	IsTruncated *bool    `json:"is_truncated"`
-	Buckets     []Bucket `json:"buckets"`
+	NextMarker  string                  `json:"next_marker"`
+	IsTruncated *bool                   `json:"is_truncated"`
+	Buckets     []bucketDiscoveryBucket `json:"buckets"`
+}
+
+type bucketDiscoveryBucket struct {
+	Name    string `json:"name"`
+	Region  string `json:"region"`
+	Private *bool  `json:"private"`
+}
+
+func storageRegionName(regionID string) string {
+	if name, ok := storageRegionNames[regionID]; ok {
+		return name
+	}
+	return regionID
 }
 
 func (c *DiscoveryClient) getJSON(ctx context.Context, params url.Values, target any) error {

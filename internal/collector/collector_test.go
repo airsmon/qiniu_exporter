@@ -23,13 +23,16 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 		{Kind: kodo.GaugeEgressBytesPerSecond, Bucket: "bucket", Region: "z0", Route: kodo.RouteDirect, Value: 4},
 	}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
 	kodoInventory := &snapshot.Store[[]kodo.Bucket]{}
-	kodoInventory.Publish([]kodo.Bucket{{Name: "bucket", Region: "z0"}}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
+	kodoInventory.Publish([]kodo.Bucket{{
+		Name: "bucket", Region: "z0", StorageRegion: "East China - Zhejiang", Private: true,
+	}}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
 	registry.MustRegister(NewKodo(kodoInventory, kodoStore))
 
 	cdnStores := CDNStores{
 		Inventory:  &snapshot.Store[[]cdn.Domain]{},
 		Monitoring: &snapshot.ResourceStore[CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[CDNAnalyticsSnapshot]{},
+		Usage:      &snapshot.Store[CDNUsageSnapshot]{},
 	}
 	cdnStores.Inventory.Publish([]cdn.Domain{{Name: "cdn.example.com", OperatingState: "success", Product: "cdn"}}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
 	cdnStores.Monitoring.Publish("cdn.example.com", CDNMonitoringSnapshot{
@@ -41,6 +44,19 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 		Statuses: []cdn.StatusCodeRateSample{{Domain: "cdn.example.com", Region: cdn.RegionGlobal, Code: "2xx", ResponsesPerSecond: 9}},
 		Cache:    cdn.CacheSample{Domain: "cdn.example.com", HitRequestsPerSecond: 8, MissRequestsPerSecond: 2, RequestHitRatio: 0.8, RequestHitRatioValid: true},
 	}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
+	cdnStores.Usage.Publish(CDNUsageSnapshot{Periods: []CDNUsagePeriodSnapshot{{
+		Period: CDNUsagePeriodToday,
+		Traffic: cdn.TrafficUsageAggregate{
+			Domains:      []cdn.DomainTrafficUsage{{Domain: "cdn.example.com", Bytes: 4096, Active: true}},
+			AccountBytes: 4096,
+		},
+		Bandwidth: cdn.BandwidthUsageAggregate{
+			Domains:                  []cdn.DomainBandwidthUsage{{Domain: "cdn.example.com", PeakBitsPerSecond: 800}},
+			AccountPeakBitsPerSecond: 800,
+		},
+		HasBandwidth: true,
+		Complete:     true,
+	}}}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
 	registry.MustRegister(NewCDN(cdnStores))
 
 	billingStores := BillingStores{
@@ -72,8 +88,14 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 	}
 	names := make(map[string]int, len(families))
 	monthlyLabels := make(map[string]float64)
+	kodoInventoryLabels := make(map[string]string)
 	for _, family := range families {
 		names[family.GetName()] = len(family.Metric)
+		if family.GetName() == "qiniu_kodo_bucket_info" {
+			for _, label := range family.Metric[0].Label {
+				kodoInventoryLabels[label.GetName()] = label.GetValue()
+			}
+		}
 		if family.GetName() == "qiniu_billing_current_year_monthly_finalized_cost" {
 			for _, metric := range family.Metric {
 				if len(metric.Label) != 2 {
@@ -95,6 +117,7 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 		"qiniu_kodo_storage_bytes", "qiniu_kodo_objects", "qiniu_kodo_requests_per_second", "qiniu_kodo_egress_bytes_per_second",
 		"qiniu_cdn_domains", "qiniu_cdn_domain_info",
 		"qiniu_cdn_monitoring_bandwidth_bits_per_second", "qiniu_cdn_monitoring_traffic_bytes_per_second", "qiniu_cdn_requests_per_second", "qiniu_cdn_http_responses_per_second",
+		"qiniu_cdn_usage_traffic_bytes", "qiniu_cdn_usage_peak_bandwidth_bits_per_second", "qiniu_cdn_usage_account_traffic_bytes", "qiniu_cdn_usage_account_peak_bandwidth_bits_per_second", "qiniu_cdn_usage_active_domains", "qiniu_cdn_usage_complete",
 		"qiniu_billing_available_balance", "qiniu_billing_unpaid_amount", "qiniu_billing_resource_pack_records", "qiniu_billing_resource_pack_remaining_ratio",
 		"qiniu_billing_last_finalized_cost", "qiniu_billing_current_year_monthly_finalized_cost",
 	}
@@ -112,8 +135,55 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 	if got := names["qiniu_kodo_bucket_info"]; got != 1 {
 		t.Fatalf("Kodo bucket inventory series = %d, want 1", got)
 	}
+	wantKodoLabels := map[string]string{
+		"bucket": "bucket", "region": "z0", "storage_region": "East China - Zhejiang", "access": "private",
+	}
+	for name, want := range wantKodoLabels {
+		if got := kodoInventoryLabels[name]; got != want {
+			t.Fatalf("Kodo bucket inventory label %s = %q, want %q", name, got, want)
+		}
+	}
 	if got := names["qiniu_cdn_domain_info"]; got != 1 {
 		t.Fatalf("CDN domain inventory series = %d, want 1", got)
+	}
+}
+
+func TestCDNCollectorOmitsIncompleteAccountUsage(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	now := time.Now()
+	stores := CDNStores{
+		Inventory:  &snapshot.Store[[]cdn.Domain]{},
+		Monitoring: &snapshot.ResourceStore[CDNMonitoringSnapshot]{},
+		Analytics:  &snapshot.ResourceStore[CDNAnalyticsSnapshot]{},
+		Usage:      &snapshot.Store[CDNUsageSnapshot]{},
+	}
+	stores.Usage.Publish(CDNUsageSnapshot{Periods: []CDNUsagePeriodSnapshot{{
+		Period: CDNUsagePeriodToday,
+		Traffic: cdn.TrafficUsageAggregate{
+			Domains:      []cdn.DomainTrafficUsage{{Domain: "healthy.example.com", Bytes: 100, Active: true}},
+			AccountBytes: 100,
+		},
+		Complete: false,
+	}}}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
+	registry.MustRegister(NewCDN(stores))
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundDomain, foundComplete := false, false
+	for _, family := range families {
+		switch family.GetName() {
+		case "qiniu_cdn_usage_traffic_bytes":
+			foundDomain = len(family.Metric) == 1 && family.Metric[0].Gauge.GetValue() == 100
+		case "qiniu_cdn_usage_complete":
+			foundComplete = len(family.Metric) == 1 && family.Metric[0].Gauge.GetValue() == 0
+		case "qiniu_cdn_usage_account_traffic_bytes", "qiniu_cdn_usage_active_domains":
+			t.Fatalf("incomplete usage exposed account aggregate %s", family.GetName())
+		}
+	}
+	if !foundDomain || !foundComplete {
+		t.Fatalf("incomplete usage domain=%v complete=%v, want per-domain data and complete=0", foundDomain, foundComplete)
 	}
 }
 

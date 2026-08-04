@@ -84,19 +84,23 @@ func SelectLatestSafeBandwidth5Min(response MonitoringResponse, domains []string
 
 	result := make([]BandwidthSample, 0, len(domains)*2)
 	for _, domain := range domains {
-		series := response.Data[domain]
+		china, oversea := float64(0), float64(0)
+		if series, ok := response.Data[domain]; ok {
+			china = optionalSeriesValue(series.China, index)
+			oversea = optionalSeriesValue(series.Oversea, index)
+		}
 		result = append(result,
 			BandwidthSample{
 				Domain:        domain,
 				Region:        RegionChina,
-				BitsPerSecond: series.China[index],
+				BitsPerSecond: china,
 				BucketStart:   starts[index],
 				BucketEnd:     starts[index].Add(FiveMinuteBucket),
 			},
 			BandwidthSample{
 				Domain:        domain,
 				Region:        RegionOversea,
-				BitsPerSecond: series.Oversea[index],
+				BitsPerSecond: oversea,
 				BucketStart:   starts[index],
 				BucketEnd:     starts[index].Add(FiveMinuteBucket),
 			},
@@ -116,19 +120,23 @@ func SelectLatestSafeTraffic5Min(response MonitoringResponse, domains []string, 
 	bucketSeconds := FiveMinuteBucket.Seconds()
 	result := make([]TrafficSample, 0, len(domains)*2)
 	for _, domain := range domains {
-		series := response.Data[domain]
+		china, oversea := float64(0), float64(0)
+		if series, ok := response.Data[domain]; ok {
+			china = optionalSeriesValue(series.China, index)
+			oversea = optionalSeriesValue(series.Oversea, index)
+		}
 		result = append(result,
 			TrafficSample{
 				Domain:         domain,
 				Region:         RegionChina,
-				BytesPerSecond: series.China[index] / bucketSeconds,
+				BytesPerSecond: china / bucketSeconds,
 				BucketStart:    starts[index],
 				BucketEnd:      starts[index].Add(FiveMinuteBucket),
 			},
 			TrafficSample{
 				Domain:         domain,
 				Region:         RegionOversea,
-				BytesPerSecond: series.Oversea[index] / bucketSeconds,
+				BytesPerSecond: oversea / bucketSeconds,
 				BucketStart:    starts[index],
 				BucketEnd:      starts[index].Add(FiveMinuteBucket),
 			},
@@ -282,8 +290,8 @@ func validateMonitoringResponse(response MonitoringResponse, domains []string, s
 	if err := checkBusinessCode(response.Code, response.Error); err != nil {
 		return 0, nil, err
 	}
-	if len(domains) == 0 || len(domains) > maxMonitoringDomains {
-		return 0, nil, fmt.Errorf("%w: expected domains must contain 1 to %d entries", ErrInvalidInput, maxMonitoringDomains)
+	if len(domains) == 0 || len(domains) > maxUsageDomains {
+		return 0, nil, fmt.Errorf("%w: expected domains must contain 1 to %d entries", ErrInvalidInput, maxUsageDomains)
 	}
 	expected := make(map[string]struct{}, len(domains))
 	for _, domain := range domains {
@@ -294,9 +302,6 @@ func validateMonitoringResponse(response MonitoringResponse, domains []string, s
 			return 0, nil, fmt.Errorf("%w: duplicate expected domain %q", ErrInvalidInput, domain)
 		}
 		expected[domain] = struct{}{}
-	}
-	if len(response.Data) != len(expected) {
-		return 0, nil, fmt.Errorf("%w: got %d domains, expected %d", ErrSeriesMisaligned, len(response.Data), len(expected))
 	}
 	for domain := range response.Data {
 		if _, ok := expected[domain]; !ok {
@@ -311,12 +316,12 @@ func validateMonitoringResponse(response MonitoringResponse, domains []string, s
 	for _, domain := range domains {
 		series, ok := response.Data[domain]
 		if !ok {
-			return 0, nil, fmt.Errorf("%w: missing domain %q", ErrSeriesMisaligned, domain)
+			continue
 		}
-		if err := validateSeries(domain+".china", series.China, len(starts)); err != nil {
+		if err := validateOptionalSeries(domain+".china", series.China, len(starts)); err != nil {
 			return 0, nil, err
 		}
-		if err := validateSeries(domain+".oversea", series.Oversea, len(starts)); err != nil {
+		if err := validateOptionalSeries(domain+".oversea", series.Oversea, len(starts)); err != nil {
 			return 0, nil, err
 		}
 	}
@@ -368,6 +373,23 @@ func validateSeries(name string, values []float64, want int) error {
 		}
 	}
 	return nil
+}
+
+// Qiniu omits an unused geographic series as an empty array while retaining
+// the domain and shared time axis. Treat that representation as an all-zero
+// series; a non-empty series must still align exactly with the time axis.
+func validateOptionalSeries(name string, values []float64, want int) error {
+	if len(values) == 0 {
+		return nil
+	}
+	return validateSeries(name, values, want)
+}
+
+func optionalSeriesValue(values []float64, index int) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	return values[index]
 }
 
 func validateOutputIdentity(domain, region string) error {

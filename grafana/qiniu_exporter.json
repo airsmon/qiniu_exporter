@@ -450,32 +450,39 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "description": "Complete automatically discovered bucket inventory. Known native Qiniu region IDs are display-mapped to readable names; unmapped values remain unchanged.",
+      "description": "Complete automatically discovered bucket inventory. Storage Region is derived from Qiniu's native Region ID; unknown future IDs remain visible. Access Control comes from the same read-only discovery response.",
       "fieldConfig": {
         "defaults": {"custom": {"align": "auto", "cellOptions": {"type": "auto"}}, "noValue": "No buckets discovered"},
         "overrides": [
           {
-            "matcher": {"id": "byName", "options": "Region"},
+            "matcher": {"id": "byName", "options": "Storage Region"},
+            "properties": [
+              {"id": "custom.width", "value": 240}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Region ID"},
+            "properties": [
+              {"id": "custom.width", "value": 150}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Access Control"},
             "properties": [
               {
                 "id": "mappings",
                 "value": [
                   {
                     "options": {
-                      "ap-southeast-2": {"text": "Asia Pacific — Hanoi (ap-southeast-2)"},
-                      "ap-southeast-3": {"text": "Asia Pacific — Ho Chi Minh City (ap-southeast-3)"},
-                      "as0": {"text": "Asia Pacific — Singapore (as0)"},
-                      "cn-east-2": {"text": "East China — Zhejiang 2 (cn-east-2)"},
-                      "na0": {"text": "North America — Los Angeles (na0)"},
-                      "z0": {"text": "East China — Zhejiang (z0)"},
-                      "z1": {"text": "North China — Hebei (z1)"},
-                      "z2": {"text": "South China — Guangdong (z2)"}
+                      "private": {"color": "green", "text": "Private"},
+                      "public": {"color": "orange", "text": "Public"}
                     },
                     "type": "value"
                   }
                 ]
               },
-              {"id": "custom.width", "value": 300}
+              {"id": "custom.cellOptions", "value": {"type": "color-background"}},
+              {"id": "custom.width", "value": 140}
             ]
           }
         ]
@@ -487,7 +494,7 @@
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "editorMode": "code",
-          "expr": "max by (qiniu_account, bucket, region) (qiniu_kodo_bucket_info{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${region:regex}\"})",
+          "expr": "max by (qiniu_account, bucket, storage_region, region, access) (qiniu_kodo_bucket_info{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${kodo_region:regex}\",storage_region!=\"\"})",
           "format": "table",
           "instant": true,
           "legendFormat": "{{bucket}}",
@@ -500,8 +507,8 @@
           "id": "organize",
           "options": {
             "excludeByName": {"Time": true, "Value": true, "__name__": true, "container": true, "endpoint": true, "instance": true, "job": true, "namespace": true, "pod": true, "qiniu_account": true, "service": true},
-            "indexByName": {"bucket": 0, "region": 1},
-            "renameByName": {"bucket": "Bucket", "region": "Region"}
+            "indexByName": {"access": 3, "bucket": 0, "region": 2, "storage_region": 1},
+            "renameByName": {"access": "Access Control", "bucket": "Bucket", "region": "Region ID", "storage_region": "Storage Region"}
           }
         }
       ],
@@ -522,7 +529,7 @@
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "editorMode": "code",
-          "expr": "qiniu_kodo_storage_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${region:regex}\",storage_class=~\"${storage_class:regex}\"}",
+          "expr": "qiniu_kodo_storage_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${kodo_region:regex}\",storage_class=~\"${storage_class:regex}\"}",
           "legendFormat": "{{bucket}} · {{region}} · {{storage_class}}",
           "range": true,
           "refId": "A"
@@ -545,7 +552,7 @@
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "editorMode": "code",
-          "expr": "qiniu_kodo_objects{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${region:regex}\",storage_class=~\"${storage_class:regex}\"}",
+          "expr": "qiniu_kodo_objects{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${kodo_region:regex}\",storage_class=~\"${storage_class:regex}\"}",
           "legendFormat": "{{bucket}} · {{region}} · {{storage_class}}",
           "range": true,
           "refId": "A"
@@ -568,7 +575,7 @@
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "editorMode": "code",
-          "expr": "qiniu_kodo_requests_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${region:regex}\"}",
+          "expr": "qiniu_kodo_requests_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${kodo_region:regex}\"}",
           "legendFormat": "{{bucket}} · {{region}} · {{operation}}",
           "range": true,
           "refId": "A"
@@ -591,7 +598,7 @@
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "editorMode": "code",
-          "expr": "qiniu_kodo_egress_bytes_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${region:regex}\"}",
+          "expr": "qiniu_kodo_egress_bytes_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${kodo_region:regex}\"}",
           "legendFormat": "{{bucket}} · {{region}} · {{route}}",
           "range": true,
           "refId": "A"
@@ -722,20 +729,108 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Complete-scope traffic bytes in the last complete Asia/Shanghai clock hour. This all-domain account total intentionally ignores the domain selector and is unavailable when any active domain failed collection.",
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "blue", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "decbytes"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 51},
+      "id": 47,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_usage_account_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"last_complete_hour\"})", "instant": true, "legendFormat": "Last hour", "range": false, "refId": "A"}],
+      "title": "All-Domain Hour Traffic",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Exact all-domain account peak in the last complete hour. The exporter sums domains at each aligned five-minute point before taking the maximum. This synchronized account value intentionally ignores the domain selector.",
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "purple", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "bps"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 51},
+      "id": 48,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_usage_account_peak_bandwidth_bits_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"last_complete_hour\"})", "instant": true, "legendFormat": "Account peak", "range": false, "refId": "A"}],
+      "title": "All-Domain Hour Peak",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Complete-scope traffic accumulated today through the latest five-minute bucket. This all-domain account total intentionally ignores the domain selector and is unavailable when a validation gate or active-domain collection is incomplete.",
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "blue", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "decbytes"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 51},
+      "id": 49,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_usage_account_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"today\"})", "instant": true, "legendFormat": "Today", "range": false, "refId": "A"}],
+      "title": "All-Domain Today Traffic",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Exact account bandwidth peak today through the latest complete five-minute bucket. This account-wide synchronized peak intentionally does not follow the domain filter.",
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "purple", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "bps"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 51},
+      "id": 50,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_usage_account_peak_bandwidth_bits_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"today\"})", "instant": true, "legendFormat": "Account peak", "range": false, "refId": "A"}],
+      "title": "All-Domain Today Peak",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Complete-scope current-month traffic combines completed billing-grade day buckets with today's complete five-minute monitoring buckets. This all-domain account total intentionally ignores the domain selector.",
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "green", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "decbytes"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 55},
+      "id": 51,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_usage_account_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"current_month\"})", "instant": true, "legendFormat": "Current month", "range": false, "refId": "A"}],
+      "title": "All-Domain Month Traffic",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Exact all-domain current-month peak from billing-grade five-minute bandwidth points for completed days plus today's complete monitoring points. Completed days are cached. This synchronized account value intentionally ignores the domain selector.",
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "purple", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "bps"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 55},
+      "id": 55,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_usage_account_peak_bandwidth_bits_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"current_month\"})", "instant": true, "legendFormat": "Account peak", "range": false, "refId": "A"}],
+      "title": "All-Domain Month Peak",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Complete-scope count of active domains with non-zero traffic today. Unlike operatingState=success, this is observed usage. It intentionally ignores the domain selector and is unavailable for an incomplete collection.",
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "orange", "mode": "fixed"}, "decimals": 0, "min": 0, "noValue": "Unavailable", "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 55},
+      "id": 52,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_usage_active_domains{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"today\"})", "instant": true, "legendFormat": "Active domains", "range": false, "refId": "A"}],
+      "title": "Active Domains Today",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Total CDN domains visible to the configured Qiniu credentials. This inventory count includes domains in every operating state.",
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "blue", "mode": "fixed"}, "decimals": 0, "min": 0, "noValue": "Unavailable", "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 55},
+      "id": 56,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_domains{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"})", "instant": true, "legendFormat": "Domains", "range": false, "refId": "A"}],
+      "title": "CDN Domains",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "fieldConfig": {
         "defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true}, "min": 0, "unit": "bps"},
         "overrides": []
       },
-      "description": "No data is expected while CDN timezone or monitoring-unit validation is gated. Confirm the gate state above before treating an empty panel as a failure.",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 51},
+      "description": "Latest complete five-minute bandwidth, summed across the selected domain scope and split by Qiniu region. Select one domain for its own series. No data is expected while CDN timezone or monitoring-unit validation is gated.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 59},
       "id": 21,
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "editorMode": "code",
-          "expr": "qiniu_cdn_monitoring_bandwidth_bits_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${region:regex}\"}",
-          "legendFormat": "{{domain}} · {{region}}",
+          "expr": "sum by (qiniu_account, region) (max by (qiniu_account, domain, region) (qiniu_cdn_monitoring_bandwidth_bits_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${cdn_region:regex}\"}))",
+          "legendFormat": "{{region}}",
           "range": true,
           "refId": "A"
         }
@@ -749,16 +844,16 @@
         "defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true}, "min": 0, "unit": "Bps"},
         "overrides": []
       },
-      "description": "No data is expected while CDN timezone or monitoring-unit validation is gated. Confirm the gate state above before treating an empty panel as a failure.",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 51},
+      "description": "Latest complete five-minute traffic rate, summed across the selected domain scope and split by Qiniu region. Select one domain for its own series. No data is expected while CDN timezone or monitoring-unit validation is gated.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 59},
       "id": 22,
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "editorMode": "code",
-          "expr": "qiniu_cdn_monitoring_traffic_bytes_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${region:regex}\"}",
-          "legendFormat": "{{domain}} · {{region}}",
+          "expr": "sum by (qiniu_account, region) (max by (qiniu_account, domain, region) (qiniu_cdn_monitoring_traffic_bytes_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${cdn_region:regex}\"}))",
+          "legendFormat": "{{region}}",
           "range": true,
           "refId": "A"
         }
@@ -768,19 +863,41 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "The five selected domains with the most current-month traffic. Values combine completed metering days with today's complete monitoring buckets; inactive domains remain zero.",
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "blue", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "decbytes"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 67},
+      "id": 53,
+      "options": {"displayMode": "gradient", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showUnfilled": false},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "topk(5, max by (qiniu_account, domain) (qiniu_cdn_usage_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",period=\"current_month\"})) and on (qiniu_account) (max by (qiniu_account) (qiniu_cdn_usage_complete{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"current_month\"}) == 1)", "instant": true, "legendFormat": "{{domain}}", "range": false, "refId": "A"}],
+      "title": "Current Month Traffic · Top 5 Domains",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Exact current-month five-minute peak bandwidth for the same five domains selected by current-month traffic. Completed billing-grade days are cached and merged with today's complete monitoring points.",
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "purple", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "bps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 67},
+      "id": 54,
+      "options": {"displayMode": "gradient", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showUnfilled": false},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "(max by (qiniu_account, domain) (qiniu_cdn_usage_peak_bandwidth_bits_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",period=\"current_month\"}) and on (qiniu_account, domain) topk(5, max by (qiniu_account, domain) (qiniu_cdn_usage_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",period=\"current_month\"}))) and on (qiniu_account) (max by (qiniu_account) (qiniu_cdn_usage_complete{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"current_month\"}) == 1)", "instant": true, "legendFormat": "{{domain}}", "range": false, "refId": "A"}],
+      "title": "Month Traffic Top 5 · Peak Bandwidth",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "fieldConfig": {
         "defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true}, "min": 0, "unit": "reqps"},
         "overrides": []
       },
       "description": "No data is expected while the CDN timezone validation gate is active. Confirm the gate state above before treating an empty panel as a collection failure.",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 59},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 75},
       "id": 23,
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "editorMode": "code",
-          "expr": "qiniu_cdn_requests_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${region:regex}\"}",
+          "expr": "qiniu_cdn_requests_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${cdn_region:regex}\"}",
           "legendFormat": "{{domain}} · {{region}}",
           "range": true,
           "refId": "A"
@@ -796,14 +913,14 @@
         "overrides": []
       },
       "description": "No data is expected while the CDN timezone validation gate is active. Confirm the gate state above before treating an empty panel as a collection failure.",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 59},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 75},
       "id": 24,
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "editorMode": "code",
-          "expr": "qiniu_cdn_http_responses_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${region:regex}\"}",
+          "expr": "qiniu_cdn_http_responses_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${cdn_region:regex}\"}",
           "legendFormat": "{{domain}} · {{region}} · {{code}}",
           "range": true,
           "refId": "A"
@@ -819,14 +936,14 @@
         "overrides": []
       },
       "description": "No data is expected while the CDN timezone validation gate is active. Confirm the gate state above before treating an empty panel as a collection failure.",
-      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 67},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 83},
       "id": 25,
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "editorMode": "code",
-          "expr": "(sum by (qiniu_account, domain) (qiniu_cdn_http_responses_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${region:regex}\",code=~\"5[0-9][0-9]|5xx\"}) or on(qiniu_account, domain) 0 * sum by (qiniu_account, domain) (qiniu_cdn_http_responses_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${region:regex}\"})) / sum by (qiniu_account, domain) (qiniu_cdn_http_responses_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${region:regex}\"})",
+          "expr": "(sum by (qiniu_account, domain) (qiniu_cdn_http_responses_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${cdn_region:regex}\",code=~\"5[0-9][0-9]|5xx\"}) or on(qiniu_account, domain) 0 * sum by (qiniu_account, domain) (qiniu_cdn_http_responses_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${cdn_region:regex}\"})) / sum by (qiniu_account, domain) (qiniu_cdn_http_responses_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",region=~\"${cdn_region:regex}\"})",
           "legendFormat": "{{domain}}",
           "range": true,
           "refId": "A"
@@ -842,7 +959,7 @@
         "overrides": []
       },
       "description": "No data is expected while the CDN timezone validation gate is active. Confirm the gate state above before treating an empty panel as a collection failure.",
-      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 67},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 83},
       "id": 26,
       "options": {"legend": {"calcs": ["lastNotNull", "min"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "asc"}},
       "targets": [
@@ -865,7 +982,7 @@
         "overrides": []
       },
       "description": "No data is expected while the CDN timezone validation gate is active. Confirm the gate state above before treating an empty panel as a collection failure.",
-      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 67},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 83},
       "id": 27,
       "options": {"legend": {"calcs": ["lastNotNull", "min"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "asc"}},
       "targets": [
@@ -891,7 +1008,7 @@
         ]
       },
       "description": "No data is expected while the CDN timezone validation gate is active. Confirm the gate state above before treating an empty panel as a collection failure.",
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 75},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 91},
       "id": 28,
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
@@ -917,7 +1034,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 83},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 99},
       "id": 30,
       "panels": [],
       "title": "Billing · Balance, Costs, and Resource Packs",
@@ -927,7 +1044,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Latest available account balance returned by Qiniu. Unavailable remains distinct from zero; no account-specific low-balance threshold is assumed.",
       "fieldConfig": {"defaults": {"color": {"fixedColor": "blue", "mode": "fixed"}, "decimals": 2, "noValue": "Unavailable", "unit": "short"}, "overrides": []},
-      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 84},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 100},
       "id": 31,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
       "targets": [
@@ -957,7 +1074,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 84},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 100},
       "id": 44,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
       "targets": [
@@ -978,7 +1095,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Estimated cost for Qiniu's current billing period. This is not a finalized invoice and may change during the period.",
       "fieldConfig": {"defaults": {"color": {"fixedColor": "semi-dark-blue", "mode": "fixed"}, "decimals": 2, "noValue": "Unavailable", "unit": "short"}, "overrides": []},
-      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 84},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 100},
       "id": 45,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
       "targets": [
@@ -999,7 +1116,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Most recently available finalized monthly cost returned by Qiniu. Use the monthly panel below for the current-year history.",
       "fieldConfig": {"defaults": {"color": {"fixedColor": "purple", "mode": "fixed"}, "decimals": 2, "noValue": "Unavailable", "unit": "short"}, "overrides": []},
-      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 84},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 100},
       "id": 46,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
       "targets": [
@@ -1023,7 +1140,7 @@
         "defaults": {"color": {"fixedColor": "blue", "mode": "fixed"}, "decimals": 2, "min": 0, "unit": "short"},
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 89},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 105},
       "id": 37,
       "options": {
         "displayMode": "gradient",
@@ -1063,7 +1180,7 @@
           }
         ]
       },
-      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 97},
+      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 113},
       "id": 38,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
       "targets": [
@@ -1105,7 +1222,7 @@
         "defaults": {"color": {"mode": "thresholds"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true}, "max": 1, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.1}, {"color": "green", "value": 0.25}]}, "unit": "percentunit"},
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 102},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 118},
       "id": 34,
       "options": {"legend": {"calcs": ["lastNotNull", "min"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "asc"}},
       "targets": [
@@ -1125,7 +1242,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "No data is expected when the resource-pack allowlist is empty. Quantities with different unit labels must never be summed.",
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 102},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 118},
       "id": 35,
       "options": {"cellHeight": "sm", "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false}, "showHeader": true},
       "targets": [
@@ -1184,7 +1301,7 @@
           }
         ]
       },
-      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 110},
+      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 126},
       "id": 36,
       "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
       "targets": [
@@ -1323,14 +1440,32 @@
         "allValue": ".*",
         "current": {"selected": true, "text": "All", "value": "$__all"},
         "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "definition": "label_values({__name__=~\"qiniu_(kodo|cdn)_.*\",qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}, region)",
+        "definition": "label_values(qiniu_kodo_bucket_info{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\"}, region)",
         "hide": 0,
         "includeAll": true,
-        "label": "Region",
+        "label": "Kodo Region ID",
         "multi": true,
-        "name": "region",
+        "name": "kodo_region",
         "options": [],
-        "query": {"query": "label_values({__name__=~\"qiniu_(kodo|cdn)_.*\",qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}, region)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "query": {"query": "label_values(qiniu_kodo_bucket_info{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\"}, region)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {"selected": true, "text": "All", "value": "$__all"},
+        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+        "definition": "label_values(qiniu_cdn_monitoring_bandwidth_bits_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\"}, region)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "CDN Region",
+        "multi": true,
+        "name": "cdn_region",
+        "options": [],
+        "query": {"query": "label_values(qiniu_cdn_monitoring_bandwidth_bits_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\"}, region)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,
@@ -1380,6 +1515,6 @@
   "timezone": "browser",
   "title": "Qiniu Exporter Overview",
   "uid": "qiniu-exporter-overview",
-  "version": 4,
+  "version": 7,
   "weekStart": ""
 }

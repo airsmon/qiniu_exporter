@@ -42,6 +42,8 @@ func TestProductionPoliciesContainOnlyFixedReadQueries(t *testing.T) {
 			{Method: http.MethodGet, Path: "/buckets", Name: "list_buckets"},
 		}}},
 		{name: "cdn", policy: cdnPolicy(), want: authhttp.Policy{Host: "fusion.qiniuapi.com", Endpoints: []authhttp.Endpoint{
+			{Method: http.MethodPost, Path: "/v2/tune/bandwidth", Name: "metering_bandwidth"},
+			{Method: http.MethodPost, Path: "/v2/tune/flux", Name: "metering_flux"},
 			{Method: http.MethodPost, Path: "/v2/tune/monitoring/bandwidth", Name: "monitoring_bandwidth"},
 			{Method: http.MethodPost, Path: "/v2/tune/monitoring/flow", Name: "monitoring_flow"},
 			{Method: http.MethodPost, Path: "/v2/tune/loganalyze/reqcount", Name: "request_count"},

@@ -8,6 +8,12 @@ import (
 	"qiniu-exporter/internal/snapshot"
 )
 
+const (
+	CDNUsagePeriodLastCompleteHour = "last_complete_hour"
+	CDNUsagePeriodToday            = "today"
+	CDNUsagePeriodCurrentMonth     = "current_month"
+)
+
 type CDNMonitoringSnapshot struct {
 	Bandwidth []cdn.BandwidthSample
 	Traffic   []cdn.TrafficSample
@@ -19,25 +25,48 @@ type CDNAnalyticsSnapshot struct {
 	Cache    cdn.CacheSample
 }
 
+// CDNUsagePeriodSnapshot contains an atomic period-to-date usage view. Traffic
+// is a Gauge snapshot (not a counter); it resets at the natural period
+// boundary. Bandwidth is present only when it was calculated from aligned
+// five-minute points.
+type CDNUsagePeriodSnapshot struct {
+	Period       string
+	Traffic      cdn.TrafficUsageAggregate
+	Bandwidth    cdn.BandwidthUsageAggregate
+	HasBandwidth bool
+	Complete     bool
+}
+
+type CDNUsageSnapshot struct {
+	Periods []CDNUsagePeriodSnapshot
+}
+
 type CDNStores struct {
 	Inventory  *snapshot.Store[[]cdn.Domain]
 	Monitoring *snapshot.ResourceStore[CDNMonitoringSnapshot]
 	Analytics  *snapshot.ResourceStore[CDNAnalyticsSnapshot]
+	Usage      *snapshot.Store[CDNUsageSnapshot]
 }
 
 type CDNCollector struct {
 	stores CDNStores
 
-	domains         *prometheus.Desc
-	domainInfo      *prometheus.Desc
-	bandwidth       *prometheus.Desc
-	traffic         *prometheus.Desc
-	requests        *prometheus.Desc
-	httpResponses   *prometheus.Desc
-	cacheRequests   *prometheus.Desc
-	cacheTraffic    *prometheus.Desc
-	cacheHitRatio   *prometheus.Desc
-	trafficHitRatio *prometheus.Desc
+	domains          *prometheus.Desc
+	domainInfo       *prometheus.Desc
+	bandwidth        *prometheus.Desc
+	traffic          *prometheus.Desc
+	requests         *prometheus.Desc
+	httpResponses    *prometheus.Desc
+	cacheRequests    *prometheus.Desc
+	cacheTraffic     *prometheus.Desc
+	cacheHitRatio    *prometheus.Desc
+	trafficHitRatio  *prometheus.Desc
+	usageTraffic     *prometheus.Desc
+	usageBandwidth   *prometheus.Desc
+	accountTraffic   *prometheus.Desc
+	accountBandwidth *prometheus.Desc
+	activeDomains    *prometheus.Desc
+	usageComplete    *prometheus.Desc
 }
 
 func NewCDN(stores CDNStores) *CDNCollector {
@@ -93,6 +122,36 @@ func NewCDN(stores CDNStores) *CDNCollector {
 			"Traffic cache-hit ratio in the latest complete Qiniu CDN five-minute bucket.",
 			[]string{"domain"}, nil,
 		),
+		usageTraffic: prometheus.NewDesc(
+			"qiniu_cdn_usage_traffic_bytes",
+			"Qiniu CDN traffic bytes in a current reporting period; this Gauge resets at the natural period boundary.",
+			[]string{"domain", "period"}, nil,
+		),
+		usageBandwidth: prometheus.NewDesc(
+			"qiniu_cdn_usage_peak_bandwidth_bits_per_second",
+			"Peak Qiniu CDN bandwidth for a domain in a current reporting period, calculated from complete five-minute points.",
+			[]string{"domain", "period"}, nil,
+		),
+		accountTraffic: prometheus.NewDesc(
+			"qiniu_cdn_usage_account_traffic_bytes",
+			"Qiniu CDN traffic bytes across the complete active discovered domain scope in a current reporting period; this Gauge resets at the natural period boundary.",
+			[]string{"period"}, nil,
+		),
+		accountBandwidth: prometheus.NewDesc(
+			"qiniu_cdn_usage_account_peak_bandwidth_bits_per_second",
+			"Peak Qiniu CDN bandwidth across the complete active discovered domain scope, calculated by summing aligned points before selecting the peak.",
+			[]string{"period"}, nil,
+		),
+		activeDomains: prometheus.NewDesc(
+			"qiniu_cdn_usage_active_domains",
+			"Number of CDN domains with non-zero traffic in a current reporting period.",
+			[]string{"period"}, nil,
+		),
+		usageComplete: prometheus.NewDesc(
+			"qiniu_cdn_usage_complete",
+			"Whether the usage period includes every active CDN domain discovered for the account.",
+			[]string{"period"}, nil,
+		),
 	}
 }
 
@@ -107,6 +166,12 @@ func (c *CDNCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.cacheTraffic
 	ch <- c.cacheHitRatio
 	ch <- c.trafficHitRatio
+	ch <- c.usageTraffic
+	ch <- c.usageBandwidth
+	ch <- c.accountTraffic
+	ch <- c.accountBandwidth
+	ch <- c.activeDomains
+	ch <- c.usageComplete
 }
 
 func (c *CDNCollector) Collect(ch chan<- prometheus.Metric) {
@@ -141,6 +206,36 @@ func (c *CDNCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		if cache.TrafficHitRatioValid {
 			ch <- prometheus.MustNewConstMetric(c.trafficHitRatio, prometheus.GaugeValue, cache.TrafficHitRatio, cache.Domain)
+		}
+	}
+	if c.stores.Usage == nil {
+		return
+	}
+	if usage, _, ok := c.stores.Usage.Load(now); ok {
+		for _, period := range usage.Periods {
+			active := 0
+			for _, domain := range period.Traffic.Domains {
+				ch <- prometheus.MustNewConstMetric(c.usageTraffic, prometheus.GaugeValue, domain.Bytes, domain.Domain, period.Period)
+				if domain.Active {
+					active++
+				}
+			}
+			complete := float64(0)
+			if period.Complete {
+				complete = 1
+				ch <- prometheus.MustNewConstMetric(c.accountTraffic, prometheus.GaugeValue, period.Traffic.AccountBytes, period.Period)
+				ch <- prometheus.MustNewConstMetric(c.activeDomains, prometheus.GaugeValue, float64(active), period.Period)
+			}
+			ch <- prometheus.MustNewConstMetric(c.usageComplete, prometheus.GaugeValue, complete, period.Period)
+			if !period.HasBandwidth {
+				continue
+			}
+			for _, domain := range period.Bandwidth.Domains {
+				ch <- prometheus.MustNewConstMetric(c.usageBandwidth, prometheus.GaugeValue, domain.PeakBitsPerSecond, domain.Domain, period.Period)
+			}
+			if period.Complete {
+				ch <- prometheus.MustNewConstMetric(c.accountBandwidth, prometheus.GaugeValue, period.Bandwidth.AccountPeakBitsPerSecond, period.Period)
+			}
 		}
 	}
 }

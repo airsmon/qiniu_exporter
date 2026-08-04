@@ -381,7 +381,11 @@ func (c *Config) ValidateCDNResourceCounts(discoveredCount, activeCount int) err
 	required := 3 * domains / collectionTimeout(c.Collection.Intervals.CDNAnalytics.Value()).Seconds()
 	if c.CDN.MonitoringUnitsVerified {
 		batches := float64((activeCount + 49) / 50)
-		required += 2 * batches / collectionTimeout(c.Collection.Intervals.CDNMonitoring.Value()).Seconds()
+		// Admission uses the bounded cold-start worst case: monitoring can make
+		// two calls per isolation attempt, completed-day traffic one, and exact
+		// monthly bandwidth backfill at most ten three-day passes. Each pass is
+		// capped at 16 attempts; the shared limiter still enforces hard host QPS.
+		required += 208 * batches / collectionTimeout(c.Collection.Intervals.CDNMonitoring.Value()).Seconds()
 	}
 	if required > c.Collection.CDNFusionMaxQPS*utilization {
 		return fmt.Errorf("cdn call budget %.3f QPS exceeds first-request budget %.3f QPS", required, c.Collection.CDNFusionMaxQPS*utilization)
