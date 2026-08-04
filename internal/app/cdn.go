@@ -8,11 +8,16 @@ import (
 	"time"
 
 	"qiniu-exporter/internal/collector"
+	"qiniu-exporter/internal/config"
 	"qiniu-exporter/internal/poller"
 	"qiniu-exporter/internal/qiniu/cdn"
 	"qiniu-exporter/internal/snapshot"
 	"qiniu-exporter/internal/telemetry"
 )
+
+type CDNDiscoverer interface {
+	ListDomains(context.Context) ([]string, error)
+}
 
 type cdnPartialErrors map[string]error
 
@@ -29,20 +34,18 @@ func (e cdnPartialErrors) ErrorFor(resource string) error { return e[resource] }
 func RegisterCDN(
 	scheduler *poller.Scheduler,
 	client *cdn.Client,
-	domains []string,
-	statisticsTimezoneVerified bool,
-	monitoringUnitsVerified bool,
-	sourceLag time.Duration,
-	staleAfter time.Duration,
+	discoverer CDNDiscoverer,
+	cfg *config.Config,
 	stores collector.CDNStores,
 	metrics *telemetry.Metrics,
 ) error {
-	if !statisticsTimezoneVerified {
+	if discoverer == nil {
+		return fmt.Errorf("CDN discoverer is required")
+	}
+	if !cfg.CDN.StatisticsTimezoneVerified {
 		metrics.ObserveSkipped("cdn/analytics", "timezone_unverified")
 		metrics.ObserveSkipped("cdn/monitoring", "timezone_unverified")
-		return nil
 	}
-	metrics.InitResources("cdn", "analytics", domains, staleAfter)
 	location, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
 		return fmt.Errorf("load CDN statistics timezone: %w", err)
@@ -50,45 +53,89 @@ func RegisterCDN(
 
 	badDomains := make(map[string]error)
 	var badDomainsMu sync.RWMutex
-	if monitoringUnitsVerified {
-		metrics.InitResources("cdn", "monitoring", domains, staleAfter)
-		for batchNumber, batch := range batches(domains, 50) {
-			batch := append([]string(nil), batch...)
-			if err := scheduler.Add(poller.Job{
-				Name:      "cdn/monitoring",
-				Resources: batch,
-				PhaseKey:  fmt.Sprintf("cdn/monitoring/%d/%s", batchNumber, batch[0]),
-				Interval:  5 * time.Minute,
-				Timeout:   2 * time.Minute,
-				Run: func(ctx context.Context) error {
-					failed := collectCDNMonitoring(ctx, client, batch, sourceLag, staleAfter, location, stores.Monitoring, metrics, &badDomainsMu, badDomains)
-					if len(failed) > 0 {
-						return failed
-					}
-					return nil
-				},
-			}); err != nil {
-				return err
-			}
-		}
-	} else {
-		metrics.ObserveSkipped("cdn/monitoring", "units_unverified")
-	}
-
-	for _, configuredDomain := range domains {
-		domain := configuredDomain
-		if err := scheduler.Add(poller.Job{
-			Name:     "cdn/analytics",
-			Resource: domain,
-			PhaseKey: "cdn/analytics/" + domain,
-			Interval: 5 * time.Minute,
-			Timeout:  time.Minute,
-			Run: func(ctx context.Context) error {
-				return collectCDNAnalytics(ctx, client, domain, sourceLag, staleAfter, location, stores.Analytics, metrics, &badDomainsMu, badDomains)
-			},
-		}); err != nil {
+	catalog := newResourceCatalog[string](nil)
+	reconcile := func(ctx context.Context) error {
+		domains, err := discoverer.ListDomains(ctx)
+		if err != nil {
 			return err
 		}
+		if err := cfg.ValidateCDNResourceCount(len(domains)); err != nil {
+			return err
+		}
+		stores.Monitoring.Retain(domains)
+		stores.Analytics.Retain(domains)
+		badDomainsMu.Lock()
+		clear(badDomains)
+		badDomainsMu.Unlock()
+		if cfg.CDN.StatisticsTimezoneVerified {
+			metrics.ReplaceResources("cdn", "analytics", domains, cfg.Collection.StaleAfter.Realtime.Value())
+			if cfg.CDN.MonitoringUnitsVerified {
+				metrics.ReplaceResources("cdn", "monitoring", domains, cfg.Collection.StaleAfter.Realtime.Value())
+			}
+		}
+		catalog.Replace(domains)
+		return nil
+	}
+
+	metrics.InitCollector("cdn", "discovery")
+	if err := scheduler.Add(poller.Job{
+		Name: "cdn/discovery", PhaseKey: "cdn/discovery", Interval: cfg.Collection.Intervals.Discovery.Value(),
+		Timeout: discoveryTimeout(cfg.Collection.Intervals.Discovery.Value()), RunOnStart: true, Run: reconcile,
+	}); err != nil {
+		return err
+	}
+	if !cfg.CDN.StatisticsTimezoneVerified {
+		return nil
+	}
+	if !cfg.CDN.MonitoringUnitsVerified {
+		metrics.ObserveSkipped("cdn/monitoring", "units_unverified")
+	} else if err := scheduler.Add(poller.Job{
+		Name: "cdn/monitoring", PhaseKey: "cdn/monitoring", Interval: cfg.Collection.Intervals.CDNMonitoring.Value(),
+		Timeout: collectionTimeout(cfg.Collection.Intervals.CDNMonitoring.Value()),
+		RunResources: func(ctx context.Context) ([]string, error) {
+			domains := catalog.Snapshot()
+			if len(domains) == 0 {
+				return nil, poller.Skip("no_resources")
+			}
+			resources := append([]string(nil), domains...)
+			failed := make(cdnPartialErrors)
+			for _, batch := range batches(domains, 50) {
+				batchFailed := collectCDNMonitoring(ctx, client, batch, cfg.Collection.SourceLag.Value(), cfg.Collection.StaleAfter.Realtime.Value(), location, stores.Monitoring, metrics, &badDomainsMu, badDomains)
+				for domain, err := range batchFailed {
+					failed[domain] = err
+				}
+			}
+			if len(failed) > 0 {
+				return resources, failed
+			}
+			return resources, nil
+		},
+	}); err != nil {
+		return err
+	}
+
+	if err := scheduler.Add(poller.Job{
+		Name: "cdn/analytics", PhaseKey: "cdn/analytics", Interval: cfg.Collection.Intervals.CDNAnalytics.Value(),
+		Timeout: collectionTimeout(cfg.Collection.Intervals.CDNAnalytics.Value()),
+		RunResources: func(ctx context.Context) ([]string, error) {
+			domains := catalog.Snapshot()
+			if len(domains) == 0 {
+				return nil, poller.Skip("no_resources")
+			}
+			resources := append([]string(nil), domains...)
+			failed := make(cdnPartialErrors)
+			for _, domain := range domains {
+				if err := collectCDNAnalytics(ctx, client, domain, cfg.Collection.SourceLag.Value(), cfg.Collection.StaleAfter.Realtime.Value(), location, stores.Analytics, metrics, &badDomainsMu, badDomains); err != nil {
+					failed[domain] = err
+				}
+			}
+			if len(failed) > 0 {
+				return resources, failed
+			}
+			return resources, nil
+		},
+	}); err != nil {
+		return err
 	}
 	return nil
 }

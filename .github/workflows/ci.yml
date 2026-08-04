@@ -133,12 +133,20 @@ jobs:
             --namespace monitoring \
             --values charts/qiniu-exporter/ci/generated-config-values.yaml \
             > "${RUNNER_TEMP}/qiniu-generated.yaml"
+          helm template qiniu-exporter charts/qiniu-exporter \
+            --namespace monitoring \
+            --values charts/qiniu-exporter/ci/test-values.yaml \
+            --set serviceMonitor.honorLabels=false \
+            --show-only templates/servicemonitor.yaml \
+            > "${RUNNER_TEMP}/qiniu-honor-labels-disabled.yaml"
 
           if grep -q '^kind: ConfigMap$' "${RUNNER_TEMP}/qiniu-prometheus.yaml"; then
             echo "The external configuration Secret scenario rendered a ConfigMap."
             exit 1
           fi
           grep -q '^kind: ConfigMap$' "${RUNNER_TEMP}/qiniu-generated.yaml"
+          grep -q '^      honorLabels: true$' "${RUNNER_TEMP}/qiniu-prometheus.yaml"
+          grep -q '^      honorLabels: false$' "${RUNNER_TEMP}/qiniu-honor-labels-disabled.yaml"
 
       - name: Validate rendered Prometheus rules
         shell: bash

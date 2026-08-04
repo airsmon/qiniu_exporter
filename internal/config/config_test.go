@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestLoadRejectsUnknownAndMissingStaticResources(t *testing.T) {
+func TestLoadRejectsUnknownResourceConfiguration(t *testing.T) {
 	path := writeConfig(t, `
 server:
   listen: ":9106"
@@ -35,9 +35,10 @@ kodo:
   enabled: true
   credential: main
   storage_classes: [standard]
+  buckets: []
 `)
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "static allowlist") {
-		t.Fatalf("expected missing allowlist error, got %v", err)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "field buckets") {
+		t.Fatalf("expected obsolete buckets field to be rejected, got %v", err)
 	}
 }
 
@@ -50,7 +51,6 @@ credentials:
 cdn:
   enabled: true
   credential: main
-  domains: [cdn.example.com]
 ---
 server:
   listen: ":9999"
@@ -69,7 +69,6 @@ credentials:
 cdn:
   enabled: true
   credential: main
-  domains: [cdn.example.com]
 `+"#"+strings.Repeat("x", maxConfigBytes))
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("expected oversized config error, got %v", err)
@@ -87,7 +86,6 @@ credentials:
 cdn:
   enabled: true
   credential: main
-  domains: [cdn.example.com]
 `)
 	cfg, err := Load(path)
 	if err != nil {
@@ -105,22 +103,88 @@ cdn:
 	}
 }
 
-func TestAdmissionRejectsOversizedCDNAllowlist(t *testing.T) {
+func TestDefaultDiscoveryCollectionIntervalsAndRealtimeStaleness(t *testing.T) {
+	cfg := defaults()
+	wantIntervals := map[string]struct {
+		got  time.Duration
+		want time.Duration
+	}{
+		"discovery":      {cfg.Collection.Intervals.Discovery.Value(), time.Hour},
+		"kodo_capacity":  {cfg.Collection.Intervals.KodoCapacity.Value(), 30 * time.Minute},
+		"kodo_activity":  {cfg.Collection.Intervals.KodoActivity.Value(), 30 * time.Minute},
+		"cdn_monitoring": {cfg.Collection.Intervals.CDNMonitoring.Value(), 30 * time.Minute},
+		"cdn_analytics":  {cfg.Collection.Intervals.CDNAnalytics.Value(), 30 * time.Minute},
+	}
+	for name, interval := range wantIntervals {
+		if interval.got != interval.want {
+			t.Errorf("default %s interval=%s, want %s", name, interval.got, interval.want)
+		}
+	}
+	if got := cfg.Collection.StaleAfter.Realtime.Value(); got != time.Hour {
+		t.Fatalf("default realtime staleness=%s, want 1h", got)
+	}
+}
+
+func TestAdmissionRejectsOversizedDiscoveredCDNSet(t *testing.T) {
 	cfg := defaults()
 	cfg.Credentials = map[string]CredentialConfig{"main": {AccessKeyEnv: "AK", SecretKeyEnv: "SK"}}
 	cfg.CDN.Enabled = true
 	cfg.CDN.Credential = "main"
 	cfg.CDN.StatisticsTimezoneVerified = true
-	for i := 0; i < 500; i++ {
-		cfg.CDN.Domains = append(cfg.CDN.Domains, "d"+strings.Repeat("x", i%30)+string(rune('a'+i%26))+".example.com")
-	}
-	// Make names unique without weakening validation.
-	for i := range cfg.CDN.Domains {
-		cfg.CDN.Domains[i] = strings.Replace(cfg.CDN.Domains[i], ".example", "."+strings.Repeat("n", i/26+1)+"example", 1)
-	}
 	cfg.Collection.CDNFusionMaxQPS = 0.1
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "call budget") {
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidateCDNResourceCount(500); err == nil || !strings.Contains(err.Error(), "call budget") {
 		t.Fatalf("expected admission error, got %v", err)
+	}
+}
+
+func TestKodoAdmissionUsesDiscoveredResourcesAndConfiguredIntervals(t *testing.T) {
+	cfg := defaults()
+	cfg.Kodo.Enabled = true
+	cfg.Kodo.StatisticsTimezoneVerified = true
+	cfg.Kodo.StorageClasses = []string{"standard", "ia"}
+
+	if err := cfg.ValidateKodoResourceCount(50); err != nil {
+		t.Fatalf("safe discovered set rejected at default intervals: %v", err)
+	}
+	cfg.Collection.Intervals.KodoCapacity = Duration(5 * time.Minute)
+	cfg.Collection.Intervals.KodoActivity = Duration(5 * time.Minute)
+	if err := cfg.ValidateKodoResourceCount(50); err == nil || !strings.Contains(err.Error(), "call budget") {
+		t.Fatalf("expected shorter intervals to exceed admission budget, got %v", err)
+	}
+	if err := cfg.ValidateKodoResourceCount(-1); err == nil || !strings.Contains(err.Error(), "must not be negative") {
+		t.Fatalf("expected negative resource count rejection, got %v", err)
+	}
+}
+
+func TestKodoAdmissionStillAccountsForDiscoveryWhenStatisticsAreUnverified(t *testing.T) {
+	cfg := defaults()
+	cfg.Kodo.Enabled = true
+	cfg.Kodo.StatisticsTimezoneVerified = false
+	cfg.Kodo.StorageClasses = []string{"standard"}
+	cfg.Collection.KodoMaxQPS = 0.000001
+
+	if err := cfg.ValidateKodoResourceCount(1); err == nil || !strings.Contains(err.Error(), "call budget") {
+		t.Fatalf("expected Kodo discovery calls to consume the shared Kodo budget, got %v", err)
+	}
+	if err := cfg.ValidateKodoResourceCount(maxDiscoveredKodoResources + 1); err == nil || !strings.Contains(err.Error(), "safety limit") {
+		t.Fatalf("expected discovered resource safety limit, got %v", err)
+	}
+}
+
+func TestCDNFusionAdmissionIsSkippedForUnverifiedStatistics(t *testing.T) {
+	cfg := defaults()
+	cfg.CDN.Enabled = true
+	cfg.CDN.StatisticsTimezoneVerified = false
+	cfg.Collection.CDNFusionMaxQPS = 0.000001
+
+	if err := cfg.ValidateCDNResourceCount(1_000); err != nil {
+		t.Fatalf("timezone-gated CDN set should not consume a statistics call budget: %v", err)
+	}
+	if err := cfg.ValidateCDNResourceCount(maxDiscoveredCDNDomains + 1); err == nil || !strings.Contains(err.Error(), "safety limit") {
+		t.Fatalf("expected discovered CDN domain safety limit, got %v", err)
 	}
 }
 
@@ -140,10 +204,9 @@ func TestRealtimeStalenessMustLeaveRoomForSourceLag(t *testing.T) {
 	cfg.CDN.Enabled = true
 	cfg.CDN.Credential = "main"
 	cfg.CDN.StatisticsTimezoneVerified = true
-	cfg.CDN.Domains = []string{"cdn.example.com"}
 	cfg.Collection.SourceLag = Duration(30 * time.Minute)
 	cfg.Collection.StaleAfter.Realtime = Duration(30 * time.Minute)
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "source_lag + 5m") {
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "longest enabled realtime interval") {
 		t.Fatalf("expected incompatible freshness window error, got %v", err)
 	}
 }

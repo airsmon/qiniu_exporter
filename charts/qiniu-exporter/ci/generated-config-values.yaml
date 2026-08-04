@@ -13,13 +13,7 @@ config:
   generated:
     kodo:
       enabled: true
-      buckets:
-        - name: test-bucket
-          region: z0
     cdn:
       enabled: true
-      domains:
-        - cdn.example.com
     billing:
       enabled: true
-

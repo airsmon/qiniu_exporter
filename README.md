@@ -13,12 +13,14 @@ Cloud.
   rate.
 - **CDN**: bandwidth, traffic, request rate, HTTP response rate, and cache hit
   metrics.
-- **Billing**: account balance, estimated cost, resource-pack usage, and the
-  most recent finalized monthly cost.
+- **Billing**: account balance, estimated cost, resource-pack usage, the most
+  recent finalized month, and finalized monthly costs for the current year.
 
-The exporter calls only a fixed allowlist of statistics and billing endpoints.
-It does not discover, create, update, delete, publish, refresh, prefetch, or
-otherwise manage Qiniu resources.
+The exporter calls only a fixed allowlist of read-only discovery, statistics,
+and billing endpoints. Discovery supplies the resource inventory used by the
+collectors; it is not exported as a management metric. The exporter does not
+create, update, delete, publish, refresh, prefetch, or otherwise change Qiniu
+resources.
 
 ## Quick start
 
@@ -26,7 +28,7 @@ Go 1.23 or later is required to run from source.
 
 ```bash
 cp configs/qiniu-exporter.example.yaml config.yaml
-# Edit config.yaml: select modules and replace all example resources.
+# Edit config.yaml: select modules and verification gates.
 # Set billing.enabled to false unless the credential has financial API access.
 
 export QINIU_ACCESS_KEY='...'
@@ -50,9 +52,10 @@ their timestamps and units have been checked against the Qiniu console.
 
 ## Collectors and metrics
 
-Collectors are enabled and scoped through the YAML configuration file. Kodo
-buckets, CDN domains, storage classes, and billing resource-pack tuples must be
-listed explicitly; the exporter performs no resource discovery.
+Collectors are enabled through the YAML configuration file. The exporter
+discovers accessible Kodo buckets and regions and active CDN domains through
+read-only APIs at startup and periodically thereafter. Kodo storage classes
+and billing resource-pack tuples remain explicitly configured.
 
 | Collector | Metric families | Labels | Enablement and behavior |
 | --- | --- | --- | --- |
@@ -66,6 +69,7 @@ listed explicitly; the exporter performs no resource discovery.
 | Billing estimate | `qiniu_billing_estimated_cost`, `qiniu_billing_estimate_period_start_timestamp_seconds`, `qiniu_billing_estimate_period_end_timestamp_seconds` | `currency` on cost | Current estimated billing period. |
 | Billing resource packs | `qiniu_billing_resource_pack_records`, `qiniu_billing_resource_pack_total`, `qiniu_billing_resource_pack_used`, `qiniu_billing_resource_pack_remaining`, `qiniu_billing_resource_pack_remaining_ratio` | `item`, `zone`, `available_time`, `unit` on quantities | Disabled when `resource_pack_allowlist` is empty. Never aggregate across `unit`. |
 | Billing finalized cost | `qiniu_billing_last_finalized_cost`, `qiniu_billing_last_finalized_period_start_timestamp_seconds` | `currency` on cost | Most recently available finalized month. |
+| Billing current-year finalized costs | `qiniu_billing_current_year_monthly_finalized_cost` | `currency`, `month` | Complete finalized months in the current Asia/Shanghai calendar year; `month` is fixed to `01`–`12`. |
 | Exporter health | `qiniu_exporter_*` | Varies by metric | Collector success, freshness, API activity, rate limiting, scheduler, and build information. |
 
 The registry also exposes the standard Go runtime and process metric families,
@@ -141,7 +145,7 @@ installation and security guidance.
 
 ## Configuration
 
-Copy the example configuration and replace the example resources:
+Copy the example configuration and select the required modules:
 
 ```bash
 cp configs/qiniu-exporter.example.yaml config.yaml
@@ -149,6 +153,10 @@ cp configs/qiniu-exporter.example.yaml config.yaml
 
 The configuration stores only environment-variable names or Secret file paths.
 It does not accept literal AK/SK values.
+
+The former `kodo.buckets` and `cdn.domains` fields have been removed. Delete
+them from existing configurations: strict YAML validation rejects those fields,
+and the exporter now discovers the corresponding resources automatically.
 
 ```yaml
 server:
@@ -163,9 +171,6 @@ kodo:
   enabled: true
   credential: main
   statistics_timezone_verified: false
-  buckets:
-    - name: example-bucket
-      region: z0
   storage_classes:
     - standard
 
@@ -174,20 +179,40 @@ cdn:
   credential: main
   statistics_timezone_verified: false
   monitoring_units_verified: false
-  domains:
-    - cdn.example.com
 
 billing:
   enabled: false
   credential: main
   timezone: Asia/Shanghai
   resource_pack_allowlist: []
+
+collection:
+  source_lag: 10m
+  intervals:
+    discovery: 1h
+    kodo_capacity: 30m
+    kodo_activity: 30m
+    cdn_monitoring: 30m
+    cdn_analytics: 30m
+  stale_after:
+    realtime: 1h
+    billing_balance: 3h
+    billing_daily: 36h
+    billing_finalized: 40d
 ```
 
 This is an intentionally safe skeleton: Billing is disabled and the Kodo/CDN
-verification gates are false, so it initially exposes exporter self-metrics but
-no Qiniu business samples. Enable only the modules and gates that have been
-validated for the account.
+verification gates are false, so it exposes exporter self-metrics and performs
+only read-only resource discovery, with no Kodo/CDN statistics samples. Enable
+only the modules and gates that have been validated for the account.
+
+When enabled, Kodo and CDN resource discovery is scheduled immediately after
+startup and every `collection.intervals.discovery` thereafter. Discovery does
+not block the HTTP server: before the first success the inventory is empty and
+the failure is visible in exporter self-metrics. A successful refresh adds new
+resources and removes departed resources from future collection and exported
+series. If a later refresh fails, the exporter retains the last complete
+resource inventory.
 
 Start the exporter:
 
@@ -259,8 +284,9 @@ printf '\n'
 chmod 0444 secrets/qiniu_access_key secrets/qiniu_secret_key
 ```
 
-Update the bucket, region, domain, and optional resource-pack allowlist in
-`config.yaml`. Disable Billing unless the credential has financial API access,
+Update the module settings, verification gates, and optional resource-pack
+allowlist in `config.yaml`. Kodo buckets/regions and CDN domains are discovered
+automatically. Disable Billing unless the credential has financial API access,
 then start the service:
 
 ```bash
@@ -296,6 +322,7 @@ Add the exporter as a normal static or discovered Prometheus target:
 ```yaml
 scrape_configs:
   - job_name: qiniu
+    scrape_interval: 30s
     static_configs:
       - targets:
           - qiniu-exporter:9106
@@ -324,12 +351,30 @@ The bundled recording and alert rules preserve Prometheus target labels, so
 multiple exporter targets are evaluated independently. Set a unique
 `qiniu_account` target label for each account.
 
+The `30s` Prometheus scrape interval reads cached metrics only. It is
+independent of `collection.intervals`: by default, the exporter refreshes Kodo
+and CDN business data every `30m` and performs resource discovery every `1h`.
+Increasing Prometheus scrape frequency does not increase Qiniu API traffic.
+
 ## Operational model
 
 Qiniu statistics APIs have independent update intervals, source-data delays,
 and account-level rate limits. The exporter therefore polls them in the
 background and publishes immutable in-memory snapshots. A Prometheus scrape of
 `/metrics` never makes an upstream Qiniu API request.
+
+The default upstream schedule is `30m` for each Kodo/CDN collector and `1h`
+for resource discovery. These values are configured under
+`collection.intervals`, independently from Prometheus scrape configuration.
+
+Billing runs on low-frequency accounting schedules. On process start, the
+finalized-bill job fills the already finalized months of the current
+Asia/Shanghai year with at most 11 distinct sequential `bill/detail` monthly
+operations through the existing 1 QPS/concurrency-1 limits. Each operation may
+make up to three bounded HTTP attempts when retryable errors occur, subject to
+the job deadline. Successful immutable months are kept in memory, so the daily
+08:30 run normally makes no request and adds only one new month after the fifth
+day. A restart rebuilds this bounded cache.
 
 This model provides predictable scrapes, per-host and per-endpoint rate
 limiting, bounded retries, a shared cooldown after rate-limit responses, and
@@ -351,14 +396,24 @@ successful snapshot remains available until its configured `stale_after`
 duration expires; expired business samples are then omitted. Exporter
 self-metrics remain available throughout the failure.
 
+The current-year Billing history is replaced only after every expected month
+has been collected successfully. If one historical month fails, the exporter
+still updates the compatible latest-finalized metric when possible, retains
+the previous complete annual snapshot, and retries only missing months on the
+next run.
+
 When Qiniu supplies a source timestamp, freshness is based on the older of the
 collection time and source-data time. Repeatedly receiving the same frozen
 upstream bucket therefore cannot keep stale data alive.
 
-Configuration validation calculates the expected request rate from the number
-of buckets, storage classes, and domains. The exporter refuses to start when a
-collector would exceed its safe call budget. Reduce the allowlist or collected
-scope instead of increasing hard-coded protection limits.
+After discovery, validation calculates the expected request rate from the
+number of buckets, storage classes, and domains. The exporter rejects an
+inventory when a collector would exceed its safe call budget. An initial
+rejection leaves the HTTP service running with an empty inventory; a later
+rejection retains the last complete inventory. Increase the corresponding
+upstream collection interval, reduce Kodo storage classes, disable an unneeded
+module, or use a credential whose resource scope is intentionally narrower
+instead of raising protection limits.
 
 ## Dashboards and alerting rules
 
@@ -380,10 +435,10 @@ signals.
 - Use environment variables or mounted Secret files for AK/SK. Never put real
   credentials in YAML, command-line flags, container images, Git history, or
   logs.
-- Restrict Qiniu IAM permissions to the configured statistics APIs and, where
-  IAM supports it, the configured resources. CDN statistics actions are
-  service-scoped, so the static domain allowlist provides the operational
-  boundary. The exporter does not require resource-management permissions.
+- Restrict Qiniu IAM permissions to the fixed read-only discovery, statistics,
+  and billing APIs and, where IAM supports it, the intended resources. The
+  discovery endpoints list inventory solely to drive operational collectors;
+  no resource-management operation or management metric is implemented.
 - Billing may require an administrator credential. Run it separately when that
   credential should not be shared with Kodo or CDN collection.
 - Bucket names, CDN domains, regions, and billing labels may be visible in

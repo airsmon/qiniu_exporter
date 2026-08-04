@@ -9,11 +9,9 @@ credentials:
 kodo:
   enabled: true
   credential: main
+  # Buckets and regions are discovered automatically through read-only APIs.
   # Keep false until request/response time semantics match the console.
   statistics_timezone_verified: false
-  buckets:
-    - name: example-bucket
-      region: z0
   storage_classes:
     - standard
     - ia
@@ -25,12 +23,11 @@ kodo:
 cdn:
   enabled: true
   credential: main
+  # Active domains are discovered automatically through a read-only API.
   # Keep false until timestamps match the console in Asia/Shanghai.
   statistics_timezone_verified: false
   # Set true only after comparing monitoring bandwidth/flow with the console.
   monitoring_units_verified: false
-  domains:
-    - cdn.example.com
 
 billing:
   enabled: true
@@ -41,8 +38,16 @@ billing:
 
 collection:
   source_lag: 10m
+  # Discovery is independent from business-statistics collection. Prometheus
+  # may continue scraping /metrics every 30s without increasing Qiniu API use.
+  intervals:
+    discovery: 1h
+    kodo_capacity: 30m
+    kodo_activity: 30m
+    cdn_monitoring: 30m
+    cdn_analytics: 30m
   stale_after:
-    realtime: 30m
+    realtime: 1h
     billing_balance: 3h
     billing_daily: 36h
     billing_finalized: 40d

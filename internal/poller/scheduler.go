@@ -2,6 +2,7 @@ package poller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"math/rand"
@@ -23,6 +24,23 @@ type Job struct {
 	// availability boundaries.
 	RunOnStartWhen func(time.Time) bool
 	Run            func(context.Context) error
+	// RunResources is the dynamic-resource variant of Run. The returned
+	// resources are observed atomically for this attempt, which lets discovery
+	// change the active resource set without mutating scheduler jobs.
+	RunResources func(context.Context) ([]string, error)
+}
+
+type skipError struct{ reason string }
+
+func (e *skipError) Error() string { return "poller: skipped: " + e.reason }
+
+// Skip marks a scheduled attempt as intentionally skipped. It increments the
+// scheduler skip counter without changing collector success state.
+func Skip(reason string) error {
+	if reason == "" {
+		reason = "unspecified"
+	}
+	return &skipError{reason: reason}
 }
 
 type Observer interface {
@@ -56,7 +74,8 @@ func New(observer Observer) *Scheduler {
 }
 
 func (s *Scheduler) Add(job Job) error {
-	if job.Name == "" || (job.Interval <= 0 && job.Next == nil) || job.Timeout <= 0 || job.Run == nil || (job.Resource != "" && len(job.Resources) > 0) {
+	validRunner := (job.Run == nil) != (job.RunResources == nil)
+	if job.Name == "" || (job.Interval <= 0 && job.Next == nil) || job.Timeout <= 0 || !validRunner || (job.Resource != "" && len(job.Resources) > 0) || (job.RunResources != nil && (job.Resource != "" || len(job.Resources) > 0)) {
 		return fmt.Errorf("invalid poller job %q", job.Name)
 	}
 	s.jobs = append(s.jobs, job)
@@ -99,13 +118,22 @@ func (s *Scheduler) runJob(ctx context.Context, job Job) {
 
 		started := time.Now()
 		runCtx, cancel := context.WithTimeout(ctx, job.Timeout)
-		err := job.Run(runCtx)
+		resources := job.Resources
+		var err error
+		if job.RunResources != nil {
+			resources, err = job.RunResources(runCtx)
+		} else {
+			err = job.Run(runCtx)
+		}
 		cancel()
 		duration := time.Since(started)
 		if s.observer != nil {
-			if len(job.Resources) > 0 {
+			var skipped *skipError
+			if errors.As(err, &skipped) {
+				s.observer.ObserveSkipped(job.Name, skipped.reason)
+			} else if len(resources) > 0 {
 				if observer, ok := s.observer.(ResourceBatchObserver); ok {
-					observer.ObserveResourceBatchJob(job.Name, job.Resources, duration, err)
+					observer.ObserveResourceBatchJob(job.Name, resources, duration, err)
 				} else {
 					s.observer.ObserveJob(job.Name, duration, err)
 				}

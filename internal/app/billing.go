@@ -23,6 +23,89 @@ type BillingStaleness struct {
 	Finalized time.Duration
 }
 
+type billDetailClient interface {
+	BillDetail(context.Context, billing.BillingPeriod) (billing.BillDetail, error)
+}
+
+type finalizedHistoryCache struct {
+	mu     sync.Mutex
+	months map[string]collector.BillingFinalizedMonth
+}
+
+type finalizedCollection struct {
+	Latest              collector.BillingFinalized
+	CurrentYear         collector.BillingFinalizedYear
+	CurrentYearComplete bool
+}
+
+func (cache *finalizedHistoryCache) collect(ctx context.Context, client billDetailClient, now time.Time) (finalizedCollection, error) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+
+	if cache.months == nil {
+		cache.months = make(map[string]collector.BillingFinalizedMonth)
+	}
+	periods := billing.CurrentYearFinalizedPeriods(now)
+	result := finalizedCollection{
+		CurrentYear: collector.BillingFinalizedYear{Year: now.In(billingHistoryLocation).Year()},
+	}
+	latestPeriod := billing.SelectPeriods(now).Finalized
+	latest, err := cache.fetch(ctx, client, latestPeriod)
+	if err != nil {
+		result.CurrentYearComplete = len(periods) == 0
+		return result, err
+	}
+	result.Latest = collector.BillingFinalized{Detail: latest.Detail, Period: latest.Period}
+
+	var historyErr error
+	for _, period := range periods {
+		if _, err := cache.fetch(ctx, client, period); err != nil {
+			historyErr = err
+			break
+		}
+	}
+
+	currentYear := make([]collector.BillingFinalizedMonth, 0, len(periods))
+	keep := make(map[string]collector.BillingFinalizedMonth, len(periods)+1)
+	for _, period := range periods {
+		key := finalizedPeriodKey(period)
+		if month, ok := cache.months[key]; ok {
+			currentYear = append(currentYear, month)
+			keep[key] = month
+		}
+	}
+	keep[finalizedPeriodKey(latestPeriod)] = latest
+	cache.months = keep
+	if historyErr == nil {
+		result.CurrentYearComplete = true
+	}
+	result.CurrentYear.Months = currentYear
+	return result, historyErr
+}
+
+func (cache *finalizedHistoryCache) fetch(ctx context.Context, client billDetailClient, period billing.BillingPeriod) (collector.BillingFinalizedMonth, error) {
+	key := finalizedPeriodKey(period)
+	if month, ok := cache.months[key]; ok {
+		return month, nil
+	}
+	value, err := client.BillDetail(ctx, period)
+	if err != nil {
+		return collector.BillingFinalizedMonth{}, err
+	}
+	if err := validateCurrency(value.Currency); err != nil {
+		return collector.BillingFinalizedMonth{}, err
+	}
+	month := collector.BillingFinalizedMonth{Detail: value, Period: period}
+	cache.months[key] = month
+	return month, nil
+}
+
+func finalizedPeriodKey(period billing.BillingPeriod) string {
+	return period.Start.Format("2006-01")
+}
+
+var billingHistoryLocation = time.FixedZone("Asia/Shanghai", 8*60*60)
+
 func RegisterBilling(
 	scheduler *poller.Scheduler,
 	client *billing.Client,
@@ -113,36 +196,27 @@ func RegisterBilling(
 		metrics.ObserveSkipped("billing/resource_packs", "allowlist_empty")
 	}
 
-	var finalizedMu sync.Mutex
-	var lastFinalized time.Time
+	finalizedCache := &finalizedHistoryCache{}
 	if err := scheduler.Add(poller.Job{
 		Name:       "billing/finalized",
 		Next:       nextShanghaiTime(8, 30),
 		Timeout:    time.Minute,
 		RunOnStart: true,
 		Run: func(ctx context.Context) error {
-			period := billing.SelectPeriods(time.Now()).Finalized
-			finalizedMu.Lock()
-			alreadyCollected := period.Start.Equal(lastFinalized)
-			finalizedMu.Unlock()
-			if alreadyCollected {
-				return nil
+			now := time.Now()
+			value, err := finalizedCache.collect(ctx, client, now)
+			if !value.Latest.Period.Start.IsZero() {
+				stores.Finalized.Publish(value.Latest, snapshot.Meta{
+					CollectedAt: now, DataAt: value.Latest.Period.End, StaleAfter: stale.Finalized,
+				})
+				metrics.SetDataTimestamp("billing", "finalized", value.Latest.Period.End)
 			}
-			value, err := client.BillDetail(ctx, period)
-			if err != nil {
-				return err
+			if value.CurrentYearComplete {
+				stores.CurrentYear.Publish(value.CurrentYear, snapshot.Meta{
+					CollectedAt: now, StaleAfter: stale.Finalized,
+				})
 			}
-			if err := validateCurrency(value.Currency); err != nil {
-				return err
-			}
-			stores.Finalized.Publish(collector.BillingFinalized{Detail: value, Period: period}, snapshot.Meta{
-				CollectedAt: time.Now(), DataAt: period.End, StaleAfter: stale.Finalized,
-			})
-			metrics.SetDataTimestamp("billing", "finalized", period.End)
-			finalizedMu.Lock()
-			lastFinalized = period.Start
-			finalizedMu.Unlock()
-			return nil
+			return err
 		},
 	}); err != nil {
 		return err

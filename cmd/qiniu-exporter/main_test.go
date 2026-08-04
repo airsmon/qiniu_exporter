@@ -38,12 +38,18 @@ func TestProductionPoliciesContainOnlyFixedReadQueries(t *testing.T) {
 			{Method: http.MethodGet, Path: "/v6/blob_io", Name: "blob_io"},
 			{Method: http.MethodGet, Path: "/v6/rs_put", Name: "rs_put"},
 		}}},
+		{name: "kodo discovery", policy: kodoDiscoveryPolicy(), want: authhttp.Policy{Host: "uc.qiniuapi.com", Endpoints: []authhttp.Endpoint{
+			{Method: http.MethodGet, Path: "/buckets", Name: "list_buckets"},
+		}}},
 		{name: "cdn", policy: cdnPolicy(), want: authhttp.Policy{Host: "fusion.qiniuapi.com", Endpoints: []authhttp.Endpoint{
 			{Method: http.MethodPost, Path: "/v2/tune/monitoring/bandwidth", Name: "monitoring_bandwidth"},
 			{Method: http.MethodPost, Path: "/v2/tune/monitoring/flow", Name: "monitoring_flow"},
 			{Method: http.MethodPost, Path: "/v2/tune/loganalyze/reqcount", Name: "request_count"},
 			{Method: http.MethodPost, Path: "/v2/tune/loganalyze/statuscode", Name: "status_code"},
 			{Method: http.MethodPost, Path: "/v2/tune/loganalyze/hitmiss", Name: "hit_miss"},
+		}}},
+		{name: "cdn discovery", policy: cdnDiscoveryPolicy(), want: authhttp.Policy{Host: "api.qiniu.com", Endpoints: []authhttp.Endpoint{
+			{Method: http.MethodGet, Path: "/domain", Name: "list_domains"},
 		}}},
 		{name: "billing", policy: billingPolicy(), want: authhttp.Policy{Host: "api.qiniu.com", Endpoints: []authhttp.Endpoint{
 			{Method: http.MethodGet, Path: "/billing-api/v1/account/balance-overview", Name: "balance_overview"},

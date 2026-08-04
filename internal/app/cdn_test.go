@@ -19,6 +19,7 @@ import (
 	"qiniu-exporter/internal/poller"
 	"qiniu-exporter/internal/qiniu/billing"
 	"qiniu-exporter/internal/qiniu/cdn"
+	"qiniu-exporter/internal/qiniu/kodo"
 	"qiniu-exporter/internal/snapshot"
 	"qiniu-exporter/internal/telemetry"
 )
@@ -26,6 +27,10 @@ import (
 type appDoerFunc func(*http.Request) (*http.Response, error)
 
 func (f appDoerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }
+
+type cdnDiscovererFunc func(context.Context) ([]string, error)
+
+func (f cdnDiscovererFunc) ListDomains(ctx context.Context) ([]string, error) { return f(ctx) }
 
 func TestMonitoringIsolatesAndCachesInvalidDomain(t *testing.T) {
 	location, err := time.LoadLocation("Asia/Shanghai")
@@ -249,7 +254,11 @@ func TestUnverifiedMonitoringUnitsMakeNoMonitoringRequest(t *testing.T) {
 		Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
 	}
-	if err := RegisterCDN(scheduler, client, []string{"cdn.example.com"}, true, false, 10*time.Minute, time.Hour, stores, metrics); err != nil {
+	cfg := testRealtimeConfig()
+	cfg.CDN.StatisticsTimezoneVerified = true
+	cfg.CDN.MonitoringUnitsVerified = false
+	discoverer := cdnDiscovererFunc(func(context.Context) ([]string, error) { return []string{"cdn.example.com"}, nil })
+	if err := RegisterCDN(scheduler, client, discoverer, cfg, stores, metrics); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 0 {
@@ -296,7 +305,11 @@ func TestUnverifiedStatisticsTimezoneMakesNoCDNRequestOrFailureState(t *testing.
 		Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
 	}
-	if err := RegisterCDN(poller.New(metrics), client, []string{"cdn.example.com"}, false, true, 10*time.Minute, time.Hour, stores, metrics); err != nil {
+	cfg := testRealtimeConfig()
+	cfg.CDN.StatisticsTimezoneVerified = false
+	cfg.CDN.MonitoringUnitsVerified = true
+	discoverer := cdnDiscovererFunc(func(context.Context) ([]string, error) { return []string{"cdn.example.com"}, nil })
+	if err := RegisterCDN(poller.New(metrics), client, discoverer, cfg, stores, metrics); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 0 {
@@ -309,10 +322,12 @@ func TestUnverifiedStatisticsTimezoneMakesNoCDNRequestOrFailureState(t *testing.
 	for _, family := range families {
 		if family.GetName() == "qiniu_exporter_collector_success" {
 			for _, metric := range family.Metric {
+				labels := map[string]string{}
 				for _, label := range metric.Label {
-					if label.GetName() == "module" && label.GetValue() == "cdn" {
-						t.Fatal("timezone-gated CDN collector exposed a permanent failure state")
-					}
+					labels[label.GetName()] = label.GetValue()
+				}
+				if labels["module"] == "cdn" && labels["collector"] != "discovery" {
+					t.Fatal("timezone-gated CDN statistics collector exposed a permanent failure state")
 				}
 			}
 		}
@@ -341,7 +356,7 @@ func TestKodoQueryUsesShanghaiAlignedSafeWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.August, 3, 12, 17, 0, 0, location)
-	query := kodoQuery(now, 10*time.Minute, config.Bucket{Name: "bucket", Region: "z0"}, location)
+	query := kodoQuery(now, 10*time.Minute, kodo.Bucket{Name: "bucket", Region: "z0"}, location)
 	wantEnd := time.Date(2026, time.August, 3, 12, 5, 0, 0, location)
 	if !query.End.Equal(wantEnd) || query.End.Sub(query.Begin) != 15*time.Minute || !query.SafeBefore.Equal(query.End) {
 		t.Fatalf("unexpected Kodo query: %#v", query)
@@ -388,4 +403,22 @@ func slicesContain(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func testRealtimeConfig() *config.Config {
+	return &config.Config{
+		Kodo: config.KodoConfig{Enabled: true, StorageClasses: []string{"standard"}},
+		CDN:  config.CDNConfig{Enabled: true},
+		Collection: config.CollectionConfig{
+			SourceLag: config.Duration(10 * time.Minute),
+			Intervals: config.IntervalConfig{
+				Discovery: config.Duration(time.Hour), CDNMonitoring: config.Duration(30 * time.Minute), CDNAnalytics: config.Duration(30 * time.Minute),
+				KodoCapacity: config.Duration(30 * time.Minute), KodoActivity: config.Duration(30 * time.Minute),
+			},
+			StaleAfter:              config.StaleAfterConfig{Realtime: config.Duration(time.Hour)},
+			KodoMaxQPS:              1,
+			CDNFusionMaxQPS:         5,
+			FirstRequestUtilization: 0.8,
+		},
+	}
 }

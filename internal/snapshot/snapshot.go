@@ -20,17 +20,42 @@ type ResourceValue[T any] struct {
 // ResourceStore lets successful resources advance independently while failed
 // resources retain their own last-good value until it becomes stale.
 type ResourceStore[T any] struct {
-	mu     sync.RWMutex
-	values map[string]ResourceValue[T]
+	mu      sync.RWMutex
+	values  map[string]ResourceValue[T]
+	active  map[string]struct{}
+	managed bool
 }
 
 func (s *ResourceStore[T]) Publish(resource string, data T, meta Meta) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.managed {
+		if _, ok := s.active[resource]; !ok {
+			return
+		}
+	}
 	if s.values == nil {
 		s.values = make(map[string]ResourceValue[T])
 	}
 	s.values[resource] = ResourceValue[T]{Data: data, Meta: meta}
+}
+
+// Retain removes snapshots for resources that are no longer present in the
+// latest successful discovery result.
+func (s *ResourceStore[T]) Retain(resources []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keep := make(map[string]struct{}, len(resources))
+	for _, resource := range resources {
+		keep[resource] = struct{}{}
+	}
+	for resource := range s.values {
+		if _, ok := keep[resource]; !ok {
+			delete(s.values, resource)
+		}
+	}
+	s.active = keep
+	s.managed = true
 }
 
 func (s *ResourceStore[T]) Load(now time.Time) map[string]ResourceValue[T] {

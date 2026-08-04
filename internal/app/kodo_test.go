@@ -36,7 +36,7 @@ func TestPublishKodoSnapshotRejectsMismatchedBucketEnds(t *testing.T) {
 
 func TestPublishKodoSnapshotPublishesConsistentBucketEnd(t *testing.T) {
 	store := &snapshot.ResourceStore[[]kodo.GaugeSample]{}
-	point := time.Date(2026, time.August, 3, 10, 0, 0, 0, time.UTC)
+	point := time.Now().UTC().Add(-10 * time.Minute).Truncate(kodo.BucketWidth)
 	samples := []kodo.GaugeSample{
 		{Kind: kodo.GaugeStorageBytes, DataAt: point},
 		{Kind: kodo.GaugeObjects, DataAt: point},

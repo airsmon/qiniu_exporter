@@ -46,15 +46,6 @@ data:
       enabled: {{ .Values.config.generated.kodo.enabled }}
       credential: {{ .Values.config.generated.kodo.credential | quote }}
       statistics_timezone_verified: {{ .Values.config.generated.kodo.statisticsTimezoneVerified }}
-      {{- with .Values.config.generated.kodo.buckets }}
-      buckets:
-        {{- range . }}
-        - name: {{ .name | quote }}
-          region: {{ .region | quote }}
-        {{- end }}
-      {{- else }}
-      buckets: []
-      {{- end }}
       {{- with .Values.config.generated.kodo.storageClasses }}
       storage_classes:
         {{- range . }}
@@ -69,14 +60,6 @@ data:
       credential: {{ .Values.config.generated.cdn.credential | quote }}
       statistics_timezone_verified: {{ .Values.config.generated.cdn.statisticsTimezoneVerified }}
       monitoring_units_verified: {{ .Values.config.generated.cdn.monitoringUnitsVerified }}
-      {{- with .Values.config.generated.cdn.domains }}
-      domains:
-        {{- range . }}
-        - {{ . | quote }}
-        {{- end }}
-      {{- else }}
-      domains: []
-      {{- end }}
 
     billing:
       enabled: {{ .Values.config.generated.billing.enabled }}
@@ -96,6 +79,12 @@ data:
 
     collection:
       source_lag: {{ .Values.config.generated.collection.sourceLag | quote }}
+      intervals:
+        discovery: {{ .Values.config.generated.collection.intervals.discovery | quote }}
+        kodo_capacity: {{ .Values.config.generated.collection.intervals.kodoCapacity | quote }}
+        kodo_activity: {{ .Values.config.generated.collection.intervals.kodoActivity | quote }}
+        cdn_monitoring: {{ .Values.config.generated.collection.intervals.cdnMonitoring | quote }}
+        cdn_analytics: {{ .Values.config.generated.collection.intervals.cdnAnalytics | quote }}
       stale_after:
         realtime: {{ .Values.config.generated.collection.staleAfter.realtime | quote }}
         billing_balance: {{ .Values.config.generated.collection.staleAfter.billingBalance | quote }}

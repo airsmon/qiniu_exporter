@@ -75,9 +75,8 @@ config:
       enabled: false
       credential: main
       statisticsTimezoneVerified: false
-      buckets: []
-      # - name: example-bucket
-      #   region: z0
+      # Bucket names and regions are discovered automatically through
+      # read-only Kodo APIs.
       storageClasses:
         - standard
         - ia
@@ -90,8 +89,7 @@ config:
       credential: main
       statisticsTimezoneVerified: false
       monitoringUnitsVerified: false
-      domains: []
-      # - cdn.example.com
+      # Active CDN domains are discovered automatically through a read-only API.
     billing:
       # Billing is the only module enabled by default so generated config.yaml
       # is structurally valid. It still requires the existing credential Secret.
@@ -105,8 +103,16 @@ config:
       #   unit: GB
     collection:
       sourceLag: 10m
+      # These are Qiniu upstream polling intervals. They do not control the
+      # ServiceMonitor scrape interval below.
+      intervals:
+        discovery: 1h
+        kodoCapacity: 30m
+        kodoActivity: 30m
+        cdnMonitoring: 30m
+        cdnAnalytics: 30m
       staleAfter:
-        realtime: 30m
+        realtime: 1h
         billingBalance: 3h
         billingDaily: 36h
         billingFinalized: 960h
@@ -162,7 +168,8 @@ serviceMonitor:
   annotations: {}
   interval: 30s
   scrapeTimeout: 10s
-  honorLabels: false
+  # Preserve exporter-owned service/endpoint labels for Qiniu API telemetry.
+  honorLabels: true
   relabelings: []
   metricRelabelings: []
   sampleLimit: 0

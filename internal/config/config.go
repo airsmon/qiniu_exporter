@@ -20,6 +20,8 @@ import (
 const (
 	maxConfigBytes                  = 1 << 20
 	maxBillingResourcePackAllowlist = 200
+	maxDiscoveredKodoResources      = 200
+	maxDiscoveredCDNDomains         = 2000
 	MaxFirstRequestUtilization      = 0.8
 )
 
@@ -70,25 +72,18 @@ type Credentials struct {
 	SecretKey string
 }
 
-type Bucket struct {
-	Name   string `yaml:"name"`
-	Region string `yaml:"region"`
-}
-
 type KodoConfig struct {
 	Enabled                    bool     `yaml:"enabled"`
 	Credential                 string   `yaml:"credential"`
 	StatisticsTimezoneVerified bool     `yaml:"statistics_timezone_verified"`
-	Buckets                    []Bucket `yaml:"buckets"`
 	StorageClasses             []string `yaml:"storage_classes"`
 }
 
 type CDNConfig struct {
-	Enabled                    bool     `yaml:"enabled"`
-	Credential                 string   `yaml:"credential"`
-	Domains                    []string `yaml:"domains"`
-	StatisticsTimezoneVerified bool     `yaml:"statistics_timezone_verified"`
-	MonitoringUnitsVerified    bool     `yaml:"monitoring_units_verified"`
+	Enabled                    bool   `yaml:"enabled"`
+	Credential                 string `yaml:"credential"`
+	StatisticsTimezoneVerified bool   `yaml:"statistics_timezone_verified"`
+	MonitoringUnitsVerified    bool   `yaml:"monitoring_units_verified"`
 }
 
 type BillingConfig struct {
@@ -110,6 +105,7 @@ type ResourcePackAllowlist struct {
 
 type CollectionConfig struct {
 	SourceLag               Duration         `yaml:"source_lag"`
+	Intervals               IntervalConfig   `yaml:"intervals"`
 	StaleAfter              StaleAfterConfig `yaml:"stale_after"`
 	KodoMaxQPS              float64          `yaml:"kodo_max_qps"`
 	CDNFusionMaxQPS         float64          `yaml:"cdn_fusion_max_qps"`
@@ -120,6 +116,14 @@ type CollectionConfig struct {
 	KodoMaxConcurrency      int              `yaml:"kodo_max_concurrency"`
 	CDNMaxConcurrency       int              `yaml:"cdn_max_concurrency"`
 	BillingMaxConcurrency   int              `yaml:"billing_max_concurrency"`
+}
+
+type IntervalConfig struct {
+	Discovery     Duration `yaml:"discovery"`
+	KodoCapacity  Duration `yaml:"kodo_capacity"`
+	KodoActivity  Duration `yaml:"kodo_activity"`
+	CDNMonitoring Duration `yaml:"cdn_monitoring"`
+	CDNAnalytics  Duration `yaml:"cdn_analytics"`
 }
 
 type StaleAfterConfig struct {
@@ -168,7 +172,8 @@ func defaults() Config {
 		Billing: BillingConfig{Timezone: "Asia/Shanghai"},
 		Collection: CollectionConfig{
 			SourceLag:               Duration(10 * time.Minute),
-			StaleAfter:              StaleAfterConfig{Duration(30 * time.Minute), Duration(3 * time.Hour), Duration(36 * time.Hour), Duration(40 * 24 * time.Hour)},
+			Intervals:               IntervalConfig{Duration(time.Hour), Duration(30 * time.Minute), Duration(30 * time.Minute), Duration(30 * time.Minute), Duration(30 * time.Minute)},
+			StaleAfter:              StaleAfterConfig{Duration(time.Hour), Duration(3 * time.Hour), Duration(36 * time.Hour), Duration(40 * 24 * time.Hour)},
 			KodoMaxQPS:              1,
 			CDNFusionMaxQPS:         5,
 			QiniuAPIHostMaxQPS:      10,
@@ -210,6 +215,21 @@ func (c *Config) Validate() error {
 	if c.Collection.SourceLag.Value() < 5*time.Minute {
 		return errors.New("collection.source_lag must be at least 5m")
 	}
+	intervals := []time.Duration{
+		c.Collection.Intervals.Discovery.Value(),
+		c.Collection.Intervals.KodoCapacity.Value(),
+		c.Collection.Intervals.KodoActivity.Value(),
+		c.Collection.Intervals.CDNMonitoring.Value(),
+		c.Collection.Intervals.CDNAnalytics.Value(),
+	}
+	for _, interval := range intervals {
+		if interval < 5*time.Minute {
+			return errors.New("all collection.intervals durations must be at least 5m")
+		}
+	}
+	if c.Collection.Intervals.Discovery.Value() < 15*time.Minute {
+		return errors.New("collection.intervals.discovery must be at least 15m")
+	}
 	staleDurations := []time.Duration{
 		c.Collection.StaleAfter.Realtime.Value(),
 		c.Collection.StaleAfter.BillingBalance.Value(),
@@ -221,17 +241,26 @@ func (c *Config) Validate() error {
 			return errors.New("all collection.stale_after durations must be positive")
 		}
 	}
-	usesRealtime := (c.Kodo.Enabled && c.Kodo.StatisticsTimezoneVerified) || (c.CDN.Enabled && c.CDN.StatisticsTimezoneVerified)
-	if usesRealtime && c.Collection.StaleAfter.Realtime.Value() < c.Collection.SourceLag.Value()+5*time.Minute {
-		return errors.New("collection.stale_after.realtime must be at least source_lag + 5m")
+	maximumRealtimeInterval := time.Duration(0)
+	if c.Kodo.Enabled && c.Kodo.StatisticsTimezoneVerified {
+		maximumRealtimeInterval = max(maximumRealtimeInterval, c.Collection.Intervals.KodoCapacity.Value(), c.Collection.Intervals.KodoActivity.Value())
+	}
+	if c.CDN.Enabled && c.CDN.StatisticsTimezoneVerified {
+		maximumRealtimeInterval = max(maximumRealtimeInterval, c.Collection.Intervals.CDNAnalytics.Value())
+		if c.CDN.MonitoringUnitsVerified {
+			maximumRealtimeInterval = max(maximumRealtimeInterval, c.Collection.Intervals.CDNMonitoring.Value())
+		}
+	}
+	if maximumRealtimeInterval > 0 {
+		minimumStaleAfter := c.Collection.SourceLag.Value() + 5*time.Minute + maximumRealtimeInterval + maximumRealtimeInterval/10
+		if c.Collection.StaleAfter.Realtime.Value() < minimumStaleAfter {
+			return fmt.Errorf("collection.stale_after.realtime must be at least source_lag + 5m + 110%% of the longest enabled realtime interval (%s)", minimumStaleAfter)
+		}
 	}
 
 	if c.Kodo.Enabled {
 		if err := c.validateCredentialRef("kodo", c.Kodo.Credential); err != nil {
 			return err
-		}
-		if len(c.Kodo.Buckets) == 0 {
-			return errors.New("kodo.buckets must be a non-empty static allowlist")
 		}
 		if len(c.Kodo.StorageClasses) == 0 {
 			return errors.New("kodo.storage_classes must not be empty")
@@ -244,28 +273,10 @@ func (c *Config) Validate() error {
 			}
 			seen[class] = true
 		}
-		seen = map[string]bool{}
-		for _, bucket := range c.Kodo.Buckets {
-			if bucket.Name == "" || strings.TrimSpace(bucket.Name) != bucket.Name || containsControl(bucket.Name) ||
-				bucket.Region == "" || strings.TrimSpace(bucket.Region) != bucket.Region || containsControl(bucket.Region) || seen[bucket.Name] {
-				return fmt.Errorf("invalid or duplicate kodo bucket %q", bucket.Name)
-			}
-			seen[bucket.Name] = true
-		}
 	}
 	if c.CDN.Enabled {
 		if err := c.validateCredentialRef("cdn", c.CDN.Credential); err != nil {
 			return err
-		}
-		if len(c.CDN.Domains) == 0 {
-			return errors.New("cdn.domains must be a non-empty static allowlist")
-		}
-		seen := map[string]bool{}
-		for _, domain := range c.CDN.Domains {
-			if strings.TrimSpace(domain) != domain || domain == "" || strings.ContainsAny(domain, "/:; ") || containsControl(domain) || seen[domain] {
-				return fmt.Errorf("invalid or duplicate cdn domain %q", domain)
-			}
-			seen[domain] = true
 		}
 	}
 	if c.Billing.Enabled {
@@ -293,7 +304,7 @@ func (c *Config) Validate() error {
 			seen[key] = struct{}{}
 		}
 	}
-	return c.validateAdmission()
+	return nil
 }
 
 func containsControl(value string) bool {
@@ -325,28 +336,58 @@ func (c CredentialConfig) validate() error {
 	return nil
 }
 
-func (c *Config) validateAdmission() error {
-	utilization := c.Collection.FirstRequestUtilization
-	if c.Kodo.Enabled && c.Kodo.StatisticsTimezoneVerified {
-		buckets, classes := float64(len(c.Kodo.Buckets)), float64(len(c.Kodo.StorageClasses))
-		required := buckets * (4.0/300.0 + 2.0*classes/900.0)
-		if required > c.Collection.KodoMaxQPS*utilization {
-			return fmt.Errorf("kodo call budget %.3f QPS exceeds first-request budget %.3f QPS", required, c.Collection.KodoMaxQPS*utilization)
-		}
+func (c *Config) ValidateKodoResourceCount(resourceCount int) error {
+	if resourceCount < 0 {
+		return errors.New("kodo discovered resource count must not be negative")
 	}
-	if c.CDN.Enabled && c.CDN.StatisticsTimezoneVerified {
-		domains := float64(len(c.CDN.Domains))
-		requiredCalls := 3 * domains
-		if c.CDN.MonitoringUnitsVerified {
-			batches := float64((len(c.CDN.Domains) + 49) / 50)
-			requiredCalls += 2 * batches
-		}
-		required := requiredCalls / 300
-		if required > c.Collection.CDNFusionMaxQPS*utilization {
-			return fmt.Errorf("cdn call budget %.3f QPS exceeds first-request budget %.3f QPS", required, c.Collection.CDNFusionMaxQPS*utilization)
-		}
+	if resourceCount > maxDiscoveredKodoResources {
+		return fmt.Errorf("kodo discovery exceeds the safety limit of %d bucket resources", maxDiscoveredKodoResources)
+	}
+	if !c.Kodo.Enabled {
+		return nil
+	}
+	utilization := c.Collection.FirstRequestUtilization
+	discoveryPages := max(1, (resourceCount+99)/100)
+	required := float64(discoveryPages) / discoveryTimeout(c.Collection.Intervals.Discovery.Value()).Seconds()
+	if c.Kodo.StatisticsTimezoneVerified && resourceCount > 0 {
+		resources, classes := float64(resourceCount), float64(len(c.Kodo.StorageClasses))
+		required += resources * (4.0/collectionTimeout(c.Collection.Intervals.KodoActivity.Value()).Seconds() + 2.0*classes/collectionTimeout(c.Collection.Intervals.KodoCapacity.Value()).Seconds())
+	}
+	if required > c.Collection.KodoMaxQPS*utilization {
+		return fmt.Errorf("kodo call budget %.3f QPS exceeds first-request budget %.3f QPS", required, c.Collection.KodoMaxQPS*utilization)
 	}
 	return nil
+}
+
+func (c *Config) ValidateCDNResourceCount(resourceCount int) error {
+	if resourceCount < 0 {
+		return errors.New("cdn discovered resource count must not be negative")
+	}
+	if resourceCount > maxDiscoveredCDNDomains {
+		return fmt.Errorf("cdn discovery exceeds the safety limit of %d active domains", maxDiscoveredCDNDomains)
+	}
+	if !c.CDN.Enabled || !c.CDN.StatisticsTimezoneVerified || resourceCount == 0 {
+		return nil
+	}
+	utilization := c.Collection.FirstRequestUtilization
+	domains := float64(resourceCount)
+	required := 3 * domains / collectionTimeout(c.Collection.Intervals.CDNAnalytics.Value()).Seconds()
+	if c.CDN.MonitoringUnitsVerified {
+		batches := float64((resourceCount + 49) / 50)
+		required += 2 * batches / collectionTimeout(c.Collection.Intervals.CDNMonitoring.Value()).Seconds()
+	}
+	if required > c.Collection.CDNFusionMaxQPS*utilization {
+		return fmt.Errorf("cdn call budget %.3f QPS exceeds first-request budget %.3f QPS", required, c.Collection.CDNFusionMaxQPS*utilization)
+	}
+	return nil
+}
+
+func discoveryTimeout(interval time.Duration) time.Duration {
+	return min(5*time.Minute, interval/2)
+}
+
+func collectionTimeout(interval time.Duration) time.Duration {
+	return interval * 4 / 5
 }
 
 func (c CredentialConfig) Resolve() (Credentials, error) {

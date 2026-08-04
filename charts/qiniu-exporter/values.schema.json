@@ -198,23 +198,11 @@
     "kodo": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "credential", "statisticsTimezoneVerified", "buckets", "storageClasses"],
+      "required": ["enabled", "credential", "statisticsTimezoneVerified", "storageClasses"],
       "properties": {
         "enabled": { "type": "boolean" },
         "credential": { "type": "string", "minLength": 1 },
         "statisticsTimezoneVerified": { "type": "boolean" },
-        "buckets": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["name", "region"],
-            "properties": {
-              "name": { "type": "string", "minLength": 1 },
-              "region": { "type": "string", "minLength": 1 }
-            }
-          }
-        },
         "storageClasses": {
           "type": "array",
           "uniqueItems": true,
@@ -225,13 +213,12 @@
     "cdn": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "credential", "statisticsTimezoneVerified", "monitoringUnitsVerified", "domains"],
+      "required": ["enabled", "credential", "statisticsTimezoneVerified", "monitoringUnitsVerified"],
       "properties": {
         "enabled": { "type": "boolean" },
         "credential": { "type": "string", "minLength": 1 },
         "statisticsTimezoneVerified": { "type": "boolean" },
-        "monitoringUnitsVerified": { "type": "boolean" },
-        "domains": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+        "monitoringUnitsVerified": { "type": "boolean" }
       }
     },
     "billing": {
@@ -262,9 +249,21 @@
     "collection": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sourceLag", "staleAfter", "kodoMaxQPS", "cdnFusionMaxQPS", "qiniuAPIHostMaxQPS", "billingMaxQPS", "limiterBurst", "firstRequestUtilization", "kodoMaxConcurrency", "cdnMaxConcurrency", "billingMaxConcurrency"],
+      "required": ["sourceLag", "intervals", "staleAfter", "kodoMaxQPS", "cdnFusionMaxQPS", "qiniuAPIHostMaxQPS", "billingMaxQPS", "limiterBurst", "firstRequestUtilization", "kodoMaxConcurrency", "cdnMaxConcurrency", "billingMaxConcurrency"],
       "properties": {
         "sourceLag": { "$ref": "#/definitions/duration" },
+        "intervals": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["discovery", "kodoCapacity", "kodoActivity", "cdnMonitoring", "cdnAnalytics"],
+          "properties": {
+            "discovery": { "$ref": "#/definitions/duration" },
+            "kodoCapacity": { "$ref": "#/definitions/duration" },
+            "kodoActivity": { "$ref": "#/definitions/duration" },
+            "cdnMonitoring": { "$ref": "#/definitions/duration" },
+            "cdnAnalytics": { "$ref": "#/definitions/duration" }
+          }
+        },
         "staleAfter": {
           "type": "object",
           "additionalProperties": false,

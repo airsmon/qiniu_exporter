@@ -19,28 +19,40 @@ type BillingFinalized struct {
 	Period billing.BillingPeriod
 }
 
+type BillingFinalizedMonth struct {
+	Detail billing.BillDetail
+	Period billing.BillingPeriod
+}
+
+type BillingFinalizedYear struct {
+	Year   int
+	Months []BillingFinalizedMonth
+}
+
 type BillingStores struct {
 	Balance       *snapshot.Store[billing.BalanceOverview]
 	Estimate      *snapshot.Store[BillingEstimate]
 	ResourcePacks *snapshot.Store[[]billing.ResourcePackMonthOverview]
 	Finalized     *snapshot.Store[BillingFinalized]
+	CurrentYear   *snapshot.Store[BillingFinalizedYear]
 }
 
 type BillingCollector struct {
 	stores BillingStores
 
-	availableBalance      *prometheus.Desc
-	unpaidAmount          *prometheus.Desc
-	estimatedCost         *prometheus.Desc
-	estimatePeriodStart   *prometheus.Desc
-	estimatePeriodEnd     *prometheus.Desc
-	resourcePackRecords   *prometheus.Desc
-	resourcePackTotal     *prometheus.Desc
-	resourcePackUsed      *prometheus.Desc
-	resourcePackRemaining *prometheus.Desc
-	resourcePackRatio     *prometheus.Desc
-	finalizedCost         *prometheus.Desc
-	finalizedPeriodStart  *prometheus.Desc
+	availableBalance       *prometheus.Desc
+	unpaidAmount           *prometheus.Desc
+	estimatedCost          *prometheus.Desc
+	estimatePeriodStart    *prometheus.Desc
+	estimatePeriodEnd      *prometheus.Desc
+	resourcePackRecords    *prometheus.Desc
+	resourcePackTotal      *prometheus.Desc
+	resourcePackUsed       *prometheus.Desc
+	resourcePackRemaining  *prometheus.Desc
+	resourcePackRatio      *prometheus.Desc
+	finalizedCost          *prometheus.Desc
+	finalizedPeriodStart   *prometheus.Desc
+	currentYearMonthlyCost *prometheus.Desc
 }
 
 func NewBilling(stores BillingStores) *BillingCollector {
@@ -107,6 +119,11 @@ func NewBilling(stores BillingStores) *BillingCollector {
 			"Unix timestamp at the start of the most recently available finalized month.",
 			nil, nil,
 		),
+		currentYearMonthlyCost: prometheus.NewDesc(
+			"qiniu_billing_current_year_monthly_finalized_cost",
+			"Finalized cost for one month in the current Asia/Shanghai calendar year, in the currency's major unit.",
+			[]string{"currency", "month"}, nil,
+		),
 	}
 }
 
@@ -123,6 +140,7 @@ func (c *BillingCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.resourcePackRatio
 	ch <- c.finalizedCost
 	ch <- c.finalizedPeriodStart
+	ch <- c.currentYearMonthlyCost
 }
 
 func (c *BillingCollector) Collect(ch chan<- prometheus.Metric) {
@@ -154,4 +172,17 @@ func (c *BillingCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.finalizedCost, prometheus.GaugeValue, finalized.Detail.TotalMoney.MajorUnits(), finalized.Detail.Currency)
 		ch <- prometheus.MustNewConstMetric(c.finalizedPeriodStart, prometheus.GaugeValue, float64(finalized.Period.Start.Unix()))
 	}
+	if currentYear, _, ok := c.stores.CurrentYear.Load(now); ok && currentYear.Year == now.In(billingCollectorLocation).Year() {
+		for _, month := range currentYear.Months {
+			ch <- prometheus.MustNewConstMetric(
+				c.currentYearMonthlyCost,
+				prometheus.GaugeValue,
+				month.Detail.TotalMoney.MajorUnits(),
+				month.Detail.Currency,
+				month.Period.Start.Format("01"),
+			)
+		}
+	}
 }
+
+var billingCollectorLocation = time.FixedZone("Asia/Shanghai", 8*60*60)

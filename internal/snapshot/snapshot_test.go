@@ -31,6 +31,28 @@ func TestResourceStoreExpiresIndependently(t *testing.T) {
 	}
 }
 
+func TestResourceStoreRetainRemovesDepartedResources(t *testing.T) {
+	var store ResourceStore[int]
+	now := time.Unix(1000, 0)
+	meta := Meta{CollectedAt: now, StaleAfter: time.Hour}
+	store.Publish("removed", 1, meta)
+	store.Publish("retained", 2, meta)
+
+	store.Retain([]string{"retained", "new-without-snapshot", "retained"})
+	store.Publish("removed", 3, meta)
+	store.Publish("retained", 4, meta)
+	values := store.Load(now)
+	if len(values) != 1 || values["retained"].Data != 4 {
+		t.Fatalf("unexpected resources after retain: %#v", values)
+	}
+
+	store.Retain(nil)
+	store.Publish("retained", 5, meta)
+	if values := store.Load(now); len(values) != 0 {
+		t.Fatalf("empty retain did not clear snapshots or reject a late publish: %#v", values)
+	}
+}
+
 func TestStoresExpireFrozenUpstreamDataEvenAfterRecentCollection(t *testing.T) {
 	now := time.Unix(10_000, 0)
 	meta := Meta{CollectedAt: now, DataAt: now.Add(-2 * time.Hour), StaleAfter: time.Hour}

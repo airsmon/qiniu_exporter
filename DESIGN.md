@@ -20,9 +20,9 @@ The exporter is implemented in Go with background polling and in-memory snapshot
 
 ### 1.1 Monitoring-only Boundary
 
-The main process implements only operational statistics queries. Buckets, domains, Kodo regions, and enabled storage classes come from static configuration. CDN regions returned by the API are accepted only from fixed, validated enums. The MVP does not call discovery APIs in the resource-management domain.
+The main process exports only operational, usage, and billing metrics. It uses fixed read-only inventory calls to discover accessible Kodo buckets and regions and active CDN domains, because these dimensions are required to query the statistics APIs. Enabled Kodo storage classes remain static configuration, and CDN regions returned by statistics APIs are accepted only from fixed, validated enums. Inventory responses are control input only: bucket/domain counts, configuration state, and management status are not exported as business metrics.
 
-The code does not implement any resource-management method for creating, retrieving details, deleting, updating, bringing online or offline, refreshing, prefetching, or canceling orders. It also does not export counts, results, or status metrics for those operations. Statistics and billing clients use explicit endpoint allowlists and must not become general-purpose clients capable of calling arbitrary Qiniu APIs.
+The code does not implement any resource-management method for creating, deleting, updating, bringing online or offline, refreshing, prefetching, or canceling orders. Apart from the minimum read-only inventory needed for automatic discovery, it does not retrieve management details. It also does not export counts, results, or status metrics for those operations. Discovery, statistics, and billing clients use explicit endpoint allowlists and must not become general-purpose clients capable of calling arbitrary Qiniu APIs.
 
 Recommended technical baseline: Go 1.23+ (the minimum version supported by the current Prometheus Go client), with the Qiniu Go SDK pinned to a version verified during implementation. The latest version at the time of research was [`v7.27.0`](https://pkg.go.dev/github.com/qiniu/go-sdk/v7); do not use an unconstrained floating dependency.
 
@@ -31,10 +31,10 @@ Recommended technical baseline: Go 1.23+ (the minimum version supported by the c
 ### 2.1 Current Assumptions
 
 - One account per process is a deployment requirement. The configuration parser supports named credentials but cannot verify that different AK/SK pairs belong to the same account.
-- The Prometheus scrape interval is 15-60 seconds, while Qiniu business APIs are polled according to their respective data-update intervals.
-- Bucket and domain allowlists must be configured explicitly. Add new resources to monitoring through configuration changes.
-- The billing timezone is fixed to `Asia/Shanghai`. The timezones of Kodo and CDN time fields must be confirmed with a real account during the PoC. Until confirmed, the `statistics_timezone_verified=false` runtime gate for each module prevents both calls and publication.
-- The exporter only needs current state, the latest complete time bucket, the current-month estimate, and the most recently finalized month. It is not a historical ledger or reporting system.
+- The default Prometheus scrape interval is 30 seconds. It reads cached snapshots and is independent of Qiniu upstream collection intervals.
+- Kodo bucket/region and active CDN-domain discovery is scheduled immediately after startup and refreshed every hour by default. An initial failure leaves an empty inventory without blocking HTTP readiness; a later failed refresh retains the previous complete inventory. A successful refresh atomically adds and removes resources.
+- The billing timezone is fixed to `Asia/Shanghai`. The timezones of Kodo and CDN time fields must be confirmed with a real account during the PoC. Until confirmed, the `statistics_timezone_verified=false` runtime gate for each module prevents statistics calls and publication; read-only resource discovery still runs.
+- The exporter only needs current state, the latest complete time bucket, the current-month estimate, the most recently finalized month, and a bounded current-year view of finalized monthly totals. It is not a historical ledger or reporting system.
 
 ### 2.2 Not Included in the Initial Release
 
@@ -43,7 +43,7 @@ Recommended technical baseline: Go 1.23+ (the minimum version supported by the c
 - Do not persist 24 months of billing details or use `month=YYYY-MM` as a continuously growing label.
 - Do not perform synthetic Kodo PUT/DELETE probes with write side effects inside the exporter.
 - Do not download or parse access logs in the main exporter. If needed later, build this as a separate log pipeline.
-- Do not expose order, cost-allocation, historical-ledger, or arbitrary resource-management APIs, even when they are read-only.
+- Do not expose order, cost-allocation, historical-ledger, or arbitrary resource-management APIs, even when they are read-only. The only control-plane exception is the fixed minimum inventory required for Kodo/CDN discovery, and no management metric is derived from it.
 
 ## 3. Overall Architecture
 
@@ -56,6 +56,9 @@ flowchart LR
     SCH --> D["CDN client"]
     SCH --> B["Billing client"]
 
+    SCH --> KD["Kodo resource discovery"]
+    SCH --> DD["CDN resource discovery"]
+
     K -->|"Publish after success"| S
     D -->|"Publish after success"| S
     B -->|"Publish after success"| S
@@ -65,7 +68,9 @@ flowchart LR
     A --> B
 
     K --> KA["api.qiniuapi.com"]
+    KD --> KDA["uc.qiniuapi.com"]
     D --> DA["fusion.qiniuapi.com"]
+    DD --> DDA["api.qiniu.com/domain"]
     B --> BA["api.qiniu.com/billing-api"]
 ```
 
@@ -83,7 +88,9 @@ Prometheus generally recommends synchronous collection during a scrape, but perm
 
 | Module | Host / API | Authentication | SDK strategy | Known limitations |
 |---|---|---|---|---|
+| Kodo discovery | `GET https://uc.qiniuapi.com/buckets?apiVersion=v4` | Qiniu v2; `X-Qiniu-Date` | Fixed, bounded, paginated read-only inventory client using the official SDK's v4 request shape | Account-wide listing may require broader read permission than bucket-scoped statistics |
 | Kodo statistics | `https://api.qiniuapi.com/v6/*` | Qiniu v2; `X-Qiniu-Date` | Custom read-only client + `auth.AddToken(TokenQiniu, req)` | Approximately 5 minutes of latency; public documentation does not specify QPS, maximum data points, or a consistent timezone |
+| CDN discovery | `https://api.qiniu.com/domain` | Qiniu v2; `X-Qiniu-Date` | Fixed, bounded, paginated read-only inventory client + official auth | Only active CDN domains are admitted; explicit `product=dcdn` entries are excluded; shares the account-level `api.qiniu.com` quota |
 | CDN monitoring/analytics | `https://fusion.qiniuapi.com/v2/tune/*` | QBox | Fixed read-only REST client for core monitoring/analytics + official auth | 5-10 QPS; shares the quota with other callers using the same account |
 | Billing | Only four fixed GET endpoints: `balance-overview`, `bill/snapshot`, `respack/month-overview`, and `bill/detail` | Qiniu v2 | Custom fixed-GET client + official auth | QPS is unpublished; public documentation does not specify billing IAM actions |
 
@@ -113,6 +120,7 @@ Official entry point: [Kodo Data Statistics APIs](https://developer.qiniu.com/ko
 
 | Priority | Dataset | API | Purpose and conversion |
 |---|---|---|---|
+| P0 | Resource discovery | `GET https://uc.qiniuapi.com/buckets?apiVersion=v4&limit=100&marker=...` | List accessible buckets with their regions in one paginated read-only response; inventory is collector input only and produces no management metric |
 | P0 | Capacity | `/v6/space`, `/v6/space_line`, `/v6/space_intelligent_tiering`, `/v6/space_archive_ir`, `/v6/space_archive`, `/v6/space_deep_archive` | Point-in-time capacity for each storage class, in bytes; use fixed `g=5min` for the current day and select the latest complete point |
 | P0 | Object count | The six corresponding `/v6/count*` endpoints | Object count; these are not a single `/v6/count?storage_type=...` endpoint |
 | P0 | GET/egress | `/v6/blob_io` | `hits`; `flow_out`/`cdn_flow_out` in bytes; fixed `g=5min` |
@@ -133,6 +141,13 @@ The storage-class mapping is fixed:
 
 P0 request and traffic statistics are aggregated by bucket without a `storage_class` label, avoiding a sixfold increase in calls for the six `$ftype` values. The MVP does not provide an I/O collector broken down by storage class.
 
+Discovery is all-or-nothing. Sort and deduplicate bucket names, validate each
+returned region, enforce a bounded inventory size, and replace the active
+inventory only after every page passes call-budget admission. If any page,
+validation, or admission check fails, retain the previous complete inventory
+and its snapshots. The v4 listing returns regions directly and avoids an N+1
+per-bucket region lookup.
+
 ### 5.2 P0 Metrics
 
 | Metric | Type | Labels | Semantics |
@@ -150,7 +165,7 @@ The public statistics APIs do not provide HTTP status codes, error rates, reques
 
 ## 6. CDN
 
-Qiniu's CDN APIs use two hosts and two authentication schemes, but this exporter does not use domain-management endpoints. It calls only statistics endpoints through `fusion.qiniuapi.com` with QBox authentication. See the official [CDN API overview](https://developer.qiniu.com/fusion/13353/fusion-api-overview).
+Qiniu's CDN APIs use two hosts and two authentication schemes. The exporter calls the read-only, paginated `GET /domain` inventory endpoint through `api.qiniu.com` with Qiniu v2 authentication, then calls only statistics endpoints through `fusion.qiniuapi.com` with QBox authentication. It does not call any domain mutation endpoint or export domain-management metrics. See the official [CDN API overview](https://developer.qiniu.com/fusion/13353/fusion-api-overview).
 
 ### 6.1 Required APIs
 
@@ -164,7 +179,7 @@ Qiniu's CDN APIs use two hosts and two authentication schemes, but this exporter
 
 CDN usage APIs accept at most 50 domains per request and preserve the domain dimension in responses, so they can be batched. Although analytics APIs accept up to 100 domains, their response structures do not include a domain dimension. To emit per-domain metrics, the MVP queries only one domain at a time. This aggregation behavior is a mandatory PoC check.
 
-Domains come exclusively from an explicit allowlist. When batch monitoring encounters `400032`, use binary splitting to find invalid domains and negative-cache them, while marking each as a configuration error so one invalid domain cannot freeze the entire batch. Each round permits at most 16 batch attempts for binary splitting; each attempt may call bandwidth and flow at most once. Domains left unresolved when the budget is exhausted fail for that round but are not added to the negative cache, so the next round evaluates them again.
+Domains come exclusively from a complete successful discovery result and are sorted and deduplicated before admission. Discovery follows pagination with fixed page and resource limits and admits only domains in active operating state. A failed refresh retains the previous inventory. When batch monitoring encounters `400032`, use binary splitting to find invalid domains and negative-cache them until the next successful discovery refresh, while marking each as a collection error so one invalid domain cannot freeze the entire batch. Each round permits at most 16 batch attempts for binary splitting; each attempt may call bandwidth and flow at most once. Domains left unresolved when the budget is exhausted fail for that round but are not added to the negative cache, so the next round evaluates them again.
 
 ### 6.2 P0 Metrics
 
@@ -222,8 +237,20 @@ Money fields are fixed-point integers with eight decimal places and must be divi
 | `qiniu_billing_resource_pack_remaining_ratio` | Gauge | `item,zone,available_time,unit` | `month_remain / total_surplus`, range 0-1; absent when there are no records |
 | `qiniu_billing_last_finalized_cost` | Gauge | `currency` | Total cost for the most recently fully finalized month |
 | `qiniu_billing_last_finalized_period_start_timestamp_seconds` | Gauge | None | Start of the most recently finalized month |
+| `qiniu_billing_current_year_monthly_finalized_cost` | Gauge | `currency,month` | Finalized monthly total in the current Asia/Shanghai calendar year; `month` is one of the fixed values `01`–`12` |
 
-A snapshot queried on the first day of a month represents the entire previous month, not current-month MTD. The estimate metric therefore uses a neutral name and exposes period start/end separately. Do not use `bill_id`, `order_hash`, `po_id`, email, month strings, or any cost-allocation label as a label.
+A snapshot queried on the first day of a month represents the entire previous month, not current-month MTD. The estimate metric therefore uses a neutral name and exposes period start/end separately. Do not use `bill_id`, `order_hash`, `po_id`, email, `YYYY-MM` values, or any cost-allocation label as a label. The current-year metric uses only the fixed two-digit month-of-year label and is atomically replaced at the year boundary.
+
+The finalized-bill job uses the same single-month `bill/detail` endpoint for
+the latest-month compatibility metrics and the current-year view. The first
+run backfills only finalized months in the current year (at most 11 distinct
+monthly client operations), caching every successful immutable month in
+memory. Each operation may make up to three bounded HTTP attempts for retryable
+failures, subject to the job deadline and the same layered limiters. Daily runs make no request
+until a new month becomes eligible after the fifth day, then normally make one
+request. A partial backfill never replaces the last complete annual snapshot;
+the next run requests only missing months. A process restart intentionally
+rebuilds the bounded cache rather than adding persistent state.
 
 Raw resource-pack usage mixes units such as GB, thousands of requests, and minutes. Preserve a controlled `unit` label and forbid summing across units in rules and dashboards. `item/zone/available_time/unit` must exactly match a static tuple allowlist in the configuration. When the allowlist is empty, do not call the resource-pack API or export the corresponding metrics. Resource-pack pagination is all-or-nothing: if any page fails or contains an unconfigured label, do not publish partial results. If a complete successful result is empty, atomically clear the old resource-pack snapshot and export `records=0`. The MVP reads at most 50 pages of 200 records each. If pagination has not ended at that limit, fail the entire round to prevent anomalous pagination from causing unbounded calls. Accept only the officially documented currencies, `CNY` and `USD`.
 
@@ -232,7 +259,7 @@ Raw resource-pack usage mixes units such as GB, thousands of requests, and minut
 | Metric | Type | Labels | Semantics |
 |---|---|---|---|
 | `qiniu_exporter_build_info` | Gauge | `version,revision,goversion` | Build information with a constant value of 1 |
-| `qiniu_exporter_collector_success` | Gauge | `module,collector` | 1 when the latest poll of a single task succeeded, or when the latest poll for every configured resource succeeded |
+| `qiniu_exporter_collector_success` | Gauge | `module,collector` | 1 when the latest poll of a single task succeeded, or when the latest poll for every current discovered resource succeeded |
 | `qiniu_exporter_collector_last_success_timestamp_seconds` | Gauge | `module,collector` | Latest successful time for a single task; for resource-oriented tasks, the oldest latest-success time across resources |
 | `qiniu_exporter_collector_stale_after_seconds` | Gauge | `module,collector` | Maximum freshness duration configured for this enabled collector; used as an alert threshold |
 | `qiniu_exporter_data_timestamp_seconds` | Gauge | `module,collector` | Effective upstream data time represented by the current snapshot; absent when upstream does not provide a data time |
@@ -248,7 +275,7 @@ Raw resource-pack usage mixes units such as GB, thousands of requests, and minut
 
 `result` permits only a bounded set such as `success`, `api_error`, `rate_limited`, `http_4xx`, `http_5xx`, `transport_error`, and `decode_error`; never use raw error text. Validate the HTTP status first, then the JSON envelope. For example, a billing response with HTTP 200 but `code != 0` must be classified as `api_error` and fail that round. When the upstream data time is known, use `time() - qiniu_exporter_data_timestamp_seconds > qiniu_exporter_collector_stale_after_seconds` to detect stale business data. When it is unknown, apply the same configured threshold to `collector_last_success_timestamp_seconds`; no duplicate age metric is needed.
 
-Dataset-level `collector_success` is 1 only when the latest poll succeeded for every configured resource. For a resource-oriented collector, `collector_last_success_timestamp_seconds` is the oldest latest-success time among all configured resources; it must not advance merely because one healthy resource continues to succeed. Resource metrics identify individual failures. Dataset-level `data_timestamp` is the oldest known upstream time among the current resource snapshots; per-resource alerts use the resource data timestamp. Only enabled collectors export `collector_stale_after_seconds`, preventing generic freshness rules from alerting on disabled features.
+Dataset-level `collector_success` is 1 only when the latest poll succeeded for every resource in the current discovered inventory. For a resource-oriented collector, `collector_last_success_timestamp_seconds` is the oldest latest-success time among those resources; it must not advance merely because one healthy resource continues to succeed. Resource metrics identify individual failures. Dataset-level `data_timestamp` is the oldest known upstream time among the current resource snapshots; per-resource alerts use the resource data timestamp. Only enabled collectors export `collector_stale_after_seconds`, preventing generic freshness rules from alerting on disabled features.
 
 ## 9. Label and Cardinality Rules
 
@@ -272,46 +299,48 @@ All requests pass through layered limiters. The first layer limits the account's
 
 | Quota group | Hard limit | First-attempt budget | Retry budget | Burst | Maximum concurrency | Basis |
 |---|---:|---:|---:|---:|---:|---|
-| `qiniu-api-shared` (`api.qiniu.com`) | 10 QPS | 8 QPS | 2 QPS | 1 | 4 | Official per-account limit for this Host; currently only billing requests use it |
+| `qiniu-api-shared` (`api.qiniu.com`) | 10 QPS | 8 QPS | 2 QPS | 1 | 4 | Official per-account limit for this Host; shared by CDN discovery and Billing |
 | `cdn-fusion` (`fusion.qiniuapi.com`) | 5 QPS | 4 QPS | 1 QPS | 1 | 4 | Official range is 5-10 QPS; use its lower bound |
-| `kodo-stats` (`api.qiniuapi.com`) | 1 QPS | 0.8 QPS | 0.2 QPS | 1 | 1 | Local safety limit; the official limit is unpublished |
+| `kodo-shared` (`api.qiniuapi.com`, `uc.qiniuapi.com`) | 1 QPS | 0.8 QPS | 0.2 QPS | 1 | 1 | Process-wide local safety budget shared by Kodo statistics and discovery; official limits are unpublished |
 | `billing` (`api.qiniu.com`) | 1 QPS | 0.8 QPS | 0.2 QPS | 1 | 1 | Endpoint sub-limit; local safety limit because the official limit is unpublished |
 
 Normal collection requests pass through the attempt-0 limiter and may use at most 80% of the effective hard limit. Retries pass through a separate limiter and may use at most 20% of the effective hard limit. The effective hard limit is the minimum of all Host and endpoint limits on the request path; for example, Billing uses `min(qiniu_api_host_max_qps, billing_max_qps)`. Both request classes must still acquire a token from every hard limiter, so their combined traffic can never exceed any hard limit. Pagination and error-isolation calls are new normal requests and must acquire both attempt-0 and hard-limiter tokens; they cannot bypass them. CDN isolation additionally has a per-round limit of 16 batch attempts. Lowering `first_request_utilization` does not increase the retry budget. These limiters are process-local. To reserve capacity for other programs using the same account, reduce this exporter's hard limits further. Multiple exporter instances require a shared external distributed limiter. Configured limits may lower the protection ceilings built into the code; raising those ceilings is unsupported.
 
 ### 10.2 Smoothed Scheduling, Batching, and Caching
 
-- Use a stable phase for every `dataset + resource` by hashing the resource name modulo the interval, spreading work across the entire interval instead of fanning out at every five-minute boundary. Add only a small random jitter.
+- Use a stable phase for each scheduled dataset by hashing its phase key modulo the interval, avoiding a synchronized fan-out at every five-minute boundary. Add only a small random jitter. Each resource-oriented run then processes the current discovered inventory in a bounded serial loop.
 - Each task runs in one serial loop. A new run of the same task cannot overlap a previous run, and there is no unbounded pending queue. Stable phases, independent context deadlines, and layered limiters jointly control contention. The MVP does not implement a central priority queue that would introduce additional state.
 - CDN monitoring bandwidth/flow batches contain at most 50 domains. When an analytics response has no domain dimension, query one domain at a time; never incorrectly distribute an aggregate back across individual domains.
-- Kodo `/v6/*` responses are not grouped by bucket, so per-bucket metrics necessarily fan out. Query only the explicit allowlist and storage classes that are actually enabled.
+- Kodo `/v6/*` responses are not grouped by bucket, so per-bucket metrics necessarily fan out. Query only the successfully discovered inventory and storage classes that are actually enabled.
 - Query windows cover only the minimum range required to select the latest complete point. When CDN query parameters support only date granularity, cover the current day. Do not scan history during cold start. There is only one scheduled task for a given `dataset + resource`; do not issue another request for the same window while the previous run is incomplete.
 - `/metrics` never accesses upstream services. Poll Kodo/CDN, balance, and daily/finalized billing data on their documented schedules. Successful snapshots survive failed rounds and remain exportable only until their configured `stale_after` duration expires.
-- Negative-cache invalid `400032` domains until a configuration change or process restart so they are not retried every round. Continue exposing collection failure for each affected resource.
+- Negative-cache invalid `400032` domains until the next successful discovery refresh so they are not retried every round. Continue exposing collection failure for each affected resource.
 
 ### 10.3 Recommended Intervals and Cold Start
 
 | Dataset | Interval | Cold-start behavior |
 |---|---|---|
-| Kodo capacity/object count | 15 minutes | Spread by resource phase across the first complete interval |
-| Kodo GET/PUT/egress | 5 minutes | Spread across the first complete interval and read only the latest safe bucket |
-| CDN monitoring/analytics | 5 minutes | Spread by domain across the first complete interval |
+| Kodo/CDN resource discovery | 60 minutes (`collection.intervals.discovery`) | Schedule immediately without blocking the HTTP server; start with an empty inventory after an initial failure and retain the previous complete inventory after later failed refreshes |
+| Kodo capacity/object count | 30 minutes (`collection.intervals.kodo_capacity`) | Run at the dataset's first stable phase |
+| Kodo GET/PUT/egress | 30 minutes (`collection.intervals.kodo_activity`) | Run at the first stable phase and read only the latest safe five-minute bucket |
+| CDN monitoring | 30 minutes (`collection.intervals.cdn_monitoring`) | Run at the dataset's first stable phase over discovered domains |
+| CDN analytics | 30 minutes (`collection.intervals.cdn_analytics`) | Run at the dataset's first stable phase over discovered domains |
 | Billing balance | 60 minutes | Collect immediately after startup |
 | Billing estimate | Daily at 08:15 | Run at startup when a safe snapshot date exists; on the morning of the first day of each month, wait until 08:15 |
 | Billing resource packs | Daily at 08:16 | Register only when the allowlist is nonempty; run at startup only after 08:15 |
-| Final monthly bill | Daily at 08:30 | Query immediately at startup; select the month before last on days 1-4 and the previous month from day 5 onward; later runs are no-ops after success until the selected period changes |
+| Final monthly bill and current-year monthly totals | Daily at 08:30 | Query immediately at startup; select the month before last on days 1-4 and the previous month from day 5 onward; backfill only missing finalized months in the current year, then normally add one month after the fifth day |
 
 After the initial stable phase, fixed-interval tasks add approximately +/-10% random jitter. The official requirement is to query daily estimates after 08:00; the exporter adds a safety margin and starts at 08:15, while resource-pack collection starts at 08:16. The scheduler evaluates startup eligibility at the same instant it calculates the first delay, avoiding a race across 08:15. If any resource-pack page fails, the entire round fails; publish atomically only after all pages succeed.
 
-### 10.4 Startup Call-budget Admission
+### 10.4 Inventory Call-budget Admission
 
-At startup, calculate demand from configuration and perform admission control. Do not merely log average QPS and continue with an excessive workload:
+Before accepting each refreshed inventory, calculate demand from the discovered resource count and configured intervals. A rejected initial inventory leaves the exporter running with an empty resource set and a failed discovery self-metric; a rejected later refresh retains the previous complete set:
 
-- The approximate Kodo first-attempt rate is `B × (4/300 + 2×S/900)` QPS, where `B` is the number of buckets and `S` is the number of enabled storage classes. With `S=6`, a local hard limit of 1 QPS, and an 80% first-attempt budget, per-bucket mode admits up to 30 buckets. Do not send requests or include them in admission calculations until the timezone gate passes.
-- The approximate CDN fusion first-attempt rate is `[2×ceil(D/50) + 3×D] / 300` QPS, where `D` is the number of domains. Error isolation is excluded from steady-state admission but remains subject to the same attempt-0 limiter and the per-round limit of 16 batch attempts. When `monitoring_units_verified=false`, do not call the two monitoring endpoints and temporarily omit the first term from admission calculations. Do not send any CDN request until the timezone gate passes.
-- Steady-state billing call volume is low. Balance, daily APIs, and complete pagination remain subject to 1 QPS, burst 1, and concurrency 1. Do not paginate when the resource-pack allowlist is empty.
+- The conservative Kodo first-attempt demand is `ceil(B/100)/T_discovery + B × (4/T_activity + 2×S/T_capacity)` QPS, where `B` is the discovered bucket count, `S` is the enabled storage-class count, `T_discovery=min(5m, I_discovery/2)`, and each statistics timeout `T` is 80% of its configured interval. Omit the statistics terms until the timezone gate passes, but always budget the paginated discovery calls because they share the Kodo limiter. Reject inventories above 200 buckets.
+- The conservative CDN fusion demand is `2×ceil(D/50)/T_monitoring + 3×D/T_analytics` QPS, where `D` is the discovered domain count and each `T` is 80% of its configured interval. Error isolation is excluded from admission but remains subject to the same attempt-0 limiter and the per-round limit of 16 batch attempts. When `monitoring_units_verified=false`, do not call the two monitoring endpoints and omit the first term. Do not send CDN statistics requests until the timezone gate passes; read-only discovery remains enabled. Reject inventories above 2,000 active CDN domains.
+- Steady-state billing call volume is low. Balance, daily APIs, current-year finalized-month backfill, and complete pagination remain subject to 1 QPS, burst 1, and concurrency 1. A finalized history cold start uses at most 11 distinct sequential monthly operations; each operation retains the existing maximum of two retries and the one-minute job deadline. Later runs request only missing months. Do not paginate when the resource-pack allowlist is empty.
 
-If estimated demand exceeds the 80% first-attempt budget, reject startup for that collector with an explicit configuration error. With the current configuration surface, resolve this by shrinking bucket, domain, or storage-class allowlists, or by disabling an unneeded module. Supporting different intervals, aggregate semantics, or higher protection ceilings requires a reviewed code change and, where applicable, a higher Qiniu quota. Do not scale horizontally with multiple instances for the same account. If multiple instances are unavoidable, use a shared external distributed limiter and keep their aggregate budget within the account quota.
+If estimated demand exceeds the configured first-attempt budget, reject that inventory with an explicit discovery error. Resolve this by increasing the corresponding collection interval, reducing enabled storage classes, disabling an unneeded module, or restricting the credential's resource scope. Higher protection ceilings require a reviewed code change and, where applicable, a higher Qiniu quota. Do not scale horizontally with multiple instances for the same account. If multiple instances are unavoidable, use a shared external distributed limiter and keep their aggregate budget within the account quota.
 
 ### 10.5 Backoff and Adaptive Slowdown
 
@@ -332,7 +361,7 @@ If estimated demand exceeds the 80% first-attempt budget, reject startup for tha
 - Do not export cache-ratio samples when their denominator is 0. For a resource pack whose `total_surplus` is 0, export a remaining ratio of 0 to represent an exhausted or zero allocation.
 - All upstream business values for historical time buckets are Gauges. Prometheus scrape time represents observation time; `qiniu_exporter_data_timestamp_seconds` represents business-data time.
 - `last_success_timestamp` is the time at which the exporter obtained the data and must not masquerade as upstream `data_timestamp`. Calculate `stale_after` for a business snapshot from the earlier of `CollectedAt` and a known `DataAt`. Even if API requests continue to succeed, stop exporting a frozen old upstream bucket. Alert rules must check both collector success and last success.
-- When Kodo or CDN is enabled and its statistics-timezone gate is verified, `stale_after.realtime` must be at least `source_lag + 5m` or startup fails, preventing a newly collected complete bucket from immediately being considered stale.
+- When Kodo or CDN is enabled and its statistics-timezone gate is verified, `stale_after.realtime` must be at least `source_lag + 5m + 110% of the longest enabled real-time collection interval` or startup fails. The default is `1h` for the default `30m` schedule, preventing a valid snapshot from expiring before the next jittered collection can complete.
 - Safely convert fixed-point billing integers using integer/decimal arithmetic before converting to `float64` for export. Do not convert to floating point before division and introduce avoidable precision loss.
 
 ## 12. Permissions and Secrets
@@ -343,16 +372,17 @@ Official Kodo IAM action:
 
 - `kodo/statistics`: read usage statistics.
 
-`kodo/statistics` is a resource-level action. When authorizing by bucket, use the corresponding bucket QRN. Omitting the bucket for account-wide aggregate statistics generally requires `*`/all-bucket resource authorization and must be verified with a test account.
+`kodo/statistics` is a resource-level action. When authorizing by bucket, use the corresponding bucket QRN. Automatic discovery also requires read access to the v4 `/buckets` listing, which returns each bucket's region; verify the minimum applicable Kodo IAM actions with a test sub-account. Omitting the bucket for account-wide aggregate statistics generally requires `*`/all-bucket resource authorization and must be verified with a test account.
 
 Recommended CDN P0 actions:
 
+- `cdn/GetDomainList` (read-only discovery)
 - `cdn/GetBandwidthAndFlux`
 - `cdn/GetReqCount`
 - `cdn/GetStateCode`
 - `cdn/GetHitRate`
 
-These four statistics actions are service-level and cannot be scoped to individual domains through IAM. The exporter's static domain allowlist is therefore the operational scope boundary. Do not grant `CreateDomain`, `DeleteDomain`, `OnlineDomain`, `OfflineDomain`, `Update*`, `Refresh`, or `Prefetch`. See [CDN IAM Actions](https://developer.qiniu.com/af/12493/cdn-actions).
+The four statistics actions are service-level and cannot be scoped to individual domains through IAM. Automatic discovery therefore monitors every active domain visible to the selected credential. Use a deliberately scoped credential when account organization permits it. Do not grant `CreateDomain`, `DeleteDomain`, `OnlineDomain`, `OfflineDomain`, `Update*`, `Refresh`, or `Prefetch`. See [CDN IAM Actions](https://developer.qiniu.com/af/12493/cdn-actions).
 
 Public billing documentation does not provide Billing/Financial IAM actions. Before enabling Billing, verify whether an IAM key can access these APIs. If only a primary-account AK/SK works:
 
@@ -385,9 +415,6 @@ kodo:
   enabled: true
   credential: main
   statistics_timezone_verified: false
-  buckets:
-    - name: example-bucket
-      region: z0
   storage_classes: [standard, ia, archive_ir, archive, deep_archive, intelligent_tiering]
 
 cdn:
@@ -395,7 +422,6 @@ cdn:
   credential: main
   statistics_timezone_verified: false
   monitoring_units_verified: false
-  domains: [cdn.example.com]
 
 billing:
   enabled: true
@@ -409,8 +435,14 @@ billing:
 
 collection:
   source_lag: 10m
+  intervals:
+    discovery: 1h
+    kodo_capacity: 30m
+    kodo_activity: 30m
+    cdn_monitoring: 30m
+    cdn_analytics: 30m
   stale_after:
-    realtime: 30m
+    realtime: 1h
     billing_balance: 3h
     billing_daily: 36h
     billing_finalized: 40d
@@ -453,7 +485,7 @@ Status: required for each production account and environment before enabling ver
 1. Verify the signing flows for all three modules, date headers, and re-signing on retry.
 2. Record sanitized fixtures and confirm CDN monitoring units, whether CDN analytics aggregate multiple domains, and the timezones of Kodo/CDN time fields.
 3. Verify the minimum Kodo/CDN statistics IAM actions and billing API access with an IAM key.
-4. Obtain actual bucket/domain counts, calculate the call budget, and then determine allowlists, concurrency, and intervals.
+4. Verify the automatically discovered bucket/domain inventory, calculate the call budget, and then determine storage classes, credential scope, concurrency, and intervals.
 5. Compare one set of capacity, object-count, bandwidth/traffic, hit-ratio, balance, and final-bill values against the console.
 
 ### Phase 1: MVP

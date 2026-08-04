@@ -3,7 +3,9 @@
 This chart deploys `qiniu_exporter` with secure pod defaults and optional
 Prometheus Operator resources. It follows the exporter's read-only model:
 `/metrics` reads cached snapshots, while background pollers call only the
-configured Qiniu statistics and billing APIs.
+fixed Qiniu discovery, statistics, and billing APIs. It exports operational
+and usage data only; resource-management operations and metrics are out of
+scope.
 
 ## Prerequisites
 
@@ -43,20 +45,24 @@ config:
       credential: main
       # Keep false until timestamps have been checked against the console.
       statisticsTimezoneVerified: false
-      buckets:
-        - name: production-assets
-          region: z0
     cdn:
       enabled: true
       credential: main
       statisticsTimezoneVerified: false
       monitoringUnitsVerified: false
-      domains:
-        - cdn.example.com
     billing:
       # Enable only when this credential has financial API access.
       enabled: false
       credential: main
+    collection:
+      intervals:
+        discovery: 1h
+        kodoCapacity: 30m
+        kodoActivity: 30m
+        cdnMonitoring: 30m
+        cdnAnalytics: 30m
+      staleAfter:
+        realtime: 1h
 ```
 
 Install the chart:
@@ -72,6 +78,18 @@ The generated ConfigMap references credential files under
 `/var/run/secrets/qiniu/<credential-index>/`. The bundled Kodo, CDN, and Billing
 settings all select the `main` credential and therefore use the same existing
 Secret.
+
+When Kodo or CDN is enabled, the exporter schedules immediate read-only
+discovery for every accessible Kodo bucket/region and active CDN domain, then
+refreshes the resource inventory once per hour by default. An initial failure
+does not block the HTTP server; it leaves the inventory empty and is reported
+by exporter self-metrics. No bucket, region, or domain list is required in Helm
+values. Discovery does not create, update, delete, publish, refresh, or prefetch
+resources.
+
+When upgrading from a chart version that exposed `config.generated.kodo.buckets`
+or `config.generated.cdn.domains`, remove those values; the chart schema now
+rejects them because resource discovery is automatic.
 
 Defaults enable only Billing, keeping the generated exporter configuration
 structurally valid, but intentionally omit a Secret name. Supply the existing
@@ -122,6 +140,9 @@ serviceMonitor:
   enabled: true
   labels:
     release: kube-prometheus-stack
+  relabelings:
+    - targetLabel: qiniu_account
+      replacement: production
 
 prometheusRule:
   enabled: true
@@ -132,6 +153,17 @@ prometheusRule:
 ```
 
 The labels must match the selectors used by the installed Prometheus resource.
+Set a stable `qiniu_account` target label for every exporter instance; the
+bundled dashboard uses it as the top-level account selector and to prevent
+cross-account aggregation.
+The ServiceMonitor defaults to `honorLabels: true` so the exporter-owned
+`service` and `endpoint` labels keep their Qiniu API meanings instead of being
+renamed to `exported_service` and `exported_endpoint`. Set it to `false` only
+when Prometheus target labels must take precedence.
+The default ServiceMonitor interval is `30s`. It controls how often Prometheus
+reads the exporter's cached `/metrics` endpoint; it does not trigger Qiniu API
+requests. The generated exporter configuration independently polls Kodo/CDN
+statistics every `30m` and refreshes resource discovery every `1h` by default.
 The built-in PrometheusRule mirrors `rules/qiniu-exporter.rules.yml`, including
 collection failure/staleness, low balance/resource-pack, CDN quality alerts,
 and CDN/Kodo recording rules. Set `prometheusRule.builtinRules: false` to use
@@ -154,6 +186,8 @@ only complete groups supplied through `prometheusRule.additionalGroups`.
   External Secrets require an explicit restart.
 - Keep the Kodo/CDN verification gates false until their timestamps and CDN
   monitoring units have been compared with the Qiniu console.
+- The default real-time staleness threshold is `1h`, allowing for the default
+  `30m` Kodo/CDN upstream polling schedule and source-data lag.
 - Enable Billing only when the selected credential has financial API access.
 
 ## Validate

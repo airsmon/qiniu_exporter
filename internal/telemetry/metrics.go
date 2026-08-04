@@ -116,19 +116,55 @@ func New(registerer prometheus.Registerer, version, revision string) *Metrics {
 }
 
 func (m *Metrics) InitResources(module, collector string, resources []string, staleAfter time.Duration) {
+	m.ReplaceResources(module, collector, resources, staleAfter)
+}
+
+// ReplaceResources reconciles a collector with a newly discovered resource
+// set. State for unchanged resources is preserved; removed label sets are
+// deleted and newly discovered resources start unhealthy until collected.
+func (m *Metrics) ReplaceResources(module, collector string, resources []string, staleAfter time.Duration) {
 	m.resourceMu.Lock()
 	defer m.resourceMu.Unlock()
 	key := module + "/" + collector
+	oldStates := m.resourceStates[key]
+	oldLastSuccess := m.resourceLastSuccessTimes[key]
+	oldDataTimes := m.resourceDataTimes[key]
 	states := make(map[string]bool, len(resources))
+	lastSuccess := make(map[string]time.Time, len(resources))
+	dataTimes := make(map[string]time.Time, len(resources))
+	active := make(map[string]struct{}, len(resources))
 	for _, resource := range resources {
-		states[resource] = false
-		m.resourceSuccess.WithLabelValues(module, collector, resource).Set(0)
+		active[resource] = struct{}{}
+		states[resource] = oldStates[resource]
+		if value, ok := oldLastSuccess[resource]; ok {
+			lastSuccess[resource] = value
+		}
+		if value, ok := oldDataTimes[resource]; ok {
+			dataTimes[resource] = value
+		}
+		m.resourceSuccess.WithLabelValues(module, collector, resource).Set(boolFloat(states[resource]))
+	}
+	for resource := range oldStates {
+		if _, ok := active[resource]; ok {
+			continue
+		}
+		m.resourceSuccess.DeleteLabelValues(module, collector, resource)
+		m.resourceLastSuccess.DeleteLabelValues(module, collector, resource)
+		m.resourceDataTimestamp.DeleteLabelValues(module, collector, resource)
 	}
 	m.resourceStates[key] = states
-	m.resourceLastSuccessTimes[key] = make(map[string]time.Time, len(resources))
-	m.resourceDataTimes[key] = make(map[string]time.Time, len(resources))
-	m.collectorSuccess.WithLabelValues(module, collector).Set(0)
+	m.resourceLastSuccessTimes[key] = lastSuccess
+	m.resourceDataTimes[key] = dataTimes
+	if len(resources) == 0 {
+		m.collectorSuccess.DeleteLabelValues(module, collector)
+		m.collectorLastSuccess.DeleteLabelValues(module, collector)
+		m.collectorStaleAfter.DeleteLabelValues(module, collector)
+		m.dataTimestamp.DeleteLabelValues(module, collector)
+		return
+	}
 	m.collectorStaleAfter.WithLabelValues(module, collector).Set(staleAfter.Seconds())
+	m.updateResourceAggregatesLocked(module, collector)
+	m.updateResourceDataTimestampLocked(module, collector)
 }
 
 func (m *Metrics) InitCollector(module, collector string) {
@@ -191,8 +227,7 @@ func (m *Metrics) observeResourceResults(module, collector string, results map[s
 	key := module + "/" + collector
 	states, ok := m.resourceStates[key]
 	if !ok {
-		states = map[string]bool{}
-		m.resourceStates[key] = states
+		return
 	}
 	lastSuccessTimes, ok := m.resourceLastSuccessTimes[key]
 	if !ok {
@@ -201,6 +236,11 @@ func (m *Metrics) observeResourceResults(module, collector string, results map[s
 	}
 	now := time.Now()
 	for resource, err := range results {
+		if _, configured := states[resource]; !configured {
+			// Ignore a late result from a collection round that started before
+			// discovery removed this resource.
+			continue
+		}
 		states[resource] = err == nil
 		if err != nil {
 			m.resourceSuccess.WithLabelValues(module, collector, resource).Set(0)
@@ -210,27 +250,7 @@ func (m *Metrics) observeResourceResults(module, collector string, results map[s
 			m.resourceLastSuccess.WithLabelValues(module, collector, resource).Set(float64(now.Unix()))
 		}
 	}
-	allSuccessful := len(states) > 0
-	for _, successful := range states {
-		allSuccessful = allSuccessful && successful
-	}
-	if !allSuccessful {
-		m.collectorSuccess.WithLabelValues(module, collector).Set(0)
-		return
-	}
-	var oldest time.Time
-	for configured := range states {
-		value, exists := lastSuccessTimes[configured]
-		if !exists {
-			m.collectorSuccess.WithLabelValues(module, collector).Set(0)
-			return
-		}
-		if oldest.IsZero() || value.Before(oldest) {
-			oldest = value
-		}
-	}
-	m.collectorSuccess.WithLabelValues(module, collector).Set(1)
-	m.collectorLastSuccess.WithLabelValues(module, collector).Set(float64(oldest.Unix()))
+	m.updateResourceAggregatesLocked(module, collector)
 }
 
 func (m *Metrics) ObserveSkipped(name, reason string) {
@@ -255,25 +275,68 @@ func (m *Metrics) SetResourceDataTimestamp(module, collector, resource string, d
 	if dataAt.IsZero() {
 		return
 	}
-	m.resourceDataTimestamp.WithLabelValues(module, collector, resource).Set(float64(dataAt.Unix()))
-
 	m.resourceMu.Lock()
 	defer m.resourceMu.Unlock()
 	key := module + "/" + collector
+	states, configuredSet := m.resourceStates[key]
+	if !configuredSet {
+		return
+	}
+	if _, configured := states[resource]; !configured {
+		return
+	}
+	m.resourceDataTimestamp.WithLabelValues(module, collector, resource).Set(float64(dataAt.Unix()))
 	times, ok := m.resourceDataTimes[key]
 	if !ok {
 		times = map[string]time.Time{}
 		m.resourceDataTimes[key] = times
 	}
 	times[resource] = dataAt
+	m.updateResourceDataTimestampLocked(module, collector)
+}
+
+func (m *Metrics) updateResourceAggregatesLocked(module, collector string) {
+	key := module + "/" + collector
 	states := m.resourceStates[key]
-	if len(states) == 0 || len(times) < len(states) {
+	if len(states) == 0 {
+		m.collectorSuccess.DeleteLabelValues(module, collector)
+		m.collectorLastSuccess.DeleteLabelValues(module, collector)
+		return
+	}
+	lastSuccessTimes := m.resourceLastSuccessTimes[key]
+	var oldest time.Time
+	for resource, successful := range states {
+		value, exists := lastSuccessTimes[resource]
+		if !exists {
+			m.collectorSuccess.WithLabelValues(module, collector).Set(0)
+			m.collectorLastSuccess.DeleteLabelValues(module, collector)
+			return
+		}
+		if !successful {
+			m.collectorSuccess.WithLabelValues(module, collector).Set(0)
+			return
+		}
+		if oldest.IsZero() || value.Before(oldest) {
+			oldest = value
+		}
+	}
+	m.collectorSuccess.WithLabelValues(module, collector).Set(1)
+	m.collectorLastSuccess.WithLabelValues(module, collector).Set(float64(oldest.Unix()))
+}
+
+func (m *Metrics) updateResourceDataTimestampLocked(module, collector string) {
+	key := module + "/" + collector
+	states := m.resourceStates[key]
+	times := m.resourceDataTimes[key]
+	if len(states) == 0 {
+		m.dataTimestamp.DeleteLabelValues(module, collector)
 		return
 	}
 	var oldest time.Time
-	for configured := range states {
-		value, exists := times[configured]
+	for resource := range states {
+		value, exists := times[resource]
 		if !exists {
+			m.dataTimestamp.DeleteLabelValues(module, collector)
 			return
 		}
 		if oldest.IsZero() || value.Before(oldest) {
@@ -281,6 +344,13 @@ func (m *Metrics) SetResourceDataTimestamp(module, collector, resource string, d
 		}
 	}
 	m.dataTimestamp.WithLabelValues(module, collector).Set(float64(oldest.Unix()))
+}
+
+func boolFloat(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func splitJob(name string) (string, string) {

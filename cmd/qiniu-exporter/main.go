@@ -57,6 +57,8 @@ func run(configPath string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(promcollectors.NewGoCollector(), promcollectors.NewProcessCollector(promcollectors.ProcessCollectorOpts{}))
@@ -78,6 +80,22 @@ func run(configPath string, logger *slog.Logger) error {
 	}
 
 	utilization := cfg.Collection.FirstRequestUtilization
+	var qiniuAPIHostLimit, qiniuAPIFirstLimit, qiniuAPIRetryLimit *limiter.Limiter
+	if cfg.CDN.Enabled || cfg.Billing.Enabled {
+		qiniuAPIHostLimit, err = limiter.New(cfg.Collection.QiniuAPIHostMaxQPS, 4)
+		if err != nil {
+			return err
+		}
+		firstQPS, retryQPS := splitAttemptBudgets(utilization, cfg.Collection.QiniuAPIHostMaxQPS)
+		qiniuAPIFirstLimit, err = limiter.NewRate(firstQPS)
+		if err != nil {
+			return err
+		}
+		qiniuAPIRetryLimit, err = limiter.NewRate(retryQPS)
+		if err != nil {
+			return err
+		}
+	}
 	if cfg.Kodo.Enabled {
 		secret, err := credential(cfg.Kodo.Credential)
 		if err != nil {
@@ -104,12 +122,20 @@ func run(configPath string, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
+		discoveryDoer := &authhttp.Client{
+			Service: "kodo_discovery", Credentials: auth.New(secret.AccessKey, secret.SecretKey), TokenType: auth.TokenQiniu,
+			AddQiniuDate: true, Policy: kodoDiscoveryPolicy(), FirstAttemptLimiter: firstLimit, RetryLimiter: retryLimit, HostLimiter: hardLimit, Observer: metrics, MaxRetries: 2,
+		}
+		discoverer, err := kodo.NewDiscoveryClient(discoveryDoer, "")
+		if err != nil {
+			return err
+		}
 		store := &snapshot.ResourceStore[[]kodo.GaugeSample]{}
 		registry.MustRegister(collector.NewKodo(store))
 		if !cfg.Kodo.StatisticsTimezoneVerified {
 			logger.Warn("Kodo collectors disabled until statistics timezone semantics are verified against the Qiniu console")
 		}
-		if err := app.RegisterKodo(scheduler, client, cfg.Kodo, cfg.Collection.SourceLag.Value(), cfg.Collection.StaleAfter.Realtime.Value(), store, metrics); err != nil {
+		if err := app.RegisterKodo(scheduler, client, discoverer, cfg, store, metrics); err != nil {
 			return err
 		}
 	}
@@ -141,6 +167,14 @@ func run(configPath string, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
+		discoveryDoer := &authhttp.Client{
+			Service: "cdn_discovery", Credentials: auth.New(secret.AccessKey, secret.SecretKey), TokenType: auth.TokenQiniu,
+			AddQiniuDate: true, Policy: cdnDiscoveryPolicy(), FirstAttemptLimiter: qiniuAPIFirstLimit, RetryLimiter: qiniuAPIRetryLimit, HostLimiter: qiniuAPIHostLimit, Observer: metrics, MaxRetries: 2,
+		}
+		discoverer, err := cdn.NewDomainDiscoveryClient(discoveryDoer, "")
+		if err != nil {
+			return err
+		}
 		stores := collector.CDNStores{
 			Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 			Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
@@ -152,17 +186,13 @@ func run(configPath string, logger *slog.Logger) error {
 		if !cfg.CDN.MonitoringUnitsVerified {
 			logger.Warn("CDN monitoring collectors disabled until units are verified against the Qiniu console")
 		}
-		if err := app.RegisterCDN(scheduler, client, cfg.CDN.Domains, cfg.CDN.StatisticsTimezoneVerified, cfg.CDN.MonitoringUnitsVerified, cfg.Collection.SourceLag.Value(), cfg.Collection.StaleAfter.Realtime.Value(), stores, metrics); err != nil {
+		if err := app.RegisterCDN(scheduler, client, discoverer, cfg, stores, metrics); err != nil {
 			return err
 		}
 	}
 
 	if cfg.Billing.Enabled {
 		secret, err := credential(cfg.Billing.Credential)
-		if err != nil {
-			return err
-		}
-		hostLimit, err := limiter.New(cfg.Collection.QiniuAPIHostMaxQPS, 4)
 		if err != nil {
 			return err
 		}
@@ -182,7 +212,7 @@ func run(configPath string, logger *slog.Logger) error {
 		expectedCode := 0
 		doer := &authhttp.Client{
 			Service: "billing", Credentials: auth.New(secret.AccessKey, secret.SecretKey), TokenType: auth.TokenQiniu,
-			Policy: billingPolicy(), FirstAttemptLimiter: firstLimit, RetryLimiter: retryLimit, HostLimiter: hostLimit, EndpointLimiter: billingLimit, Observer: metrics, MaxRetries: 2, ExpectedBusinessCode: &expectedCode,
+			Policy: billingPolicy(), FirstAttemptLimiter: firstLimit, RetryLimiter: retryLimit, HostLimiter: qiniuAPIHostLimit, EndpointLimiter: billingLimit, Observer: metrics, MaxRetries: 2, ExpectedBusinessCode: &expectedCode,
 		}
 		client, err := billing.NewClient(doer, "")
 		if err != nil {
@@ -193,6 +223,7 @@ func run(configPath string, logger *slog.Logger) error {
 			Estimate:      &snapshot.Store[collector.BillingEstimate]{},
 			ResourcePacks: &snapshot.Store[[]billing.ResourcePackMonthOverview]{},
 			Finalized:     &snapshot.Store[collector.BillingFinalized]{},
+			CurrentYear:   &snapshot.Store[collector.BillingFinalizedYear]{},
 		}
 		registry.MustRegister(collector.NewBilling(stores))
 		if len(cfg.Billing.ResourcePackAllowlist) == 0 {
@@ -205,8 +236,6 @@ func run(configPath string, logger *slog.Logger) error {
 		}
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	scheduler.Run(ctx)
 
 	var ready atomic.Bool
@@ -284,6 +313,12 @@ func kodoPolicy() authhttp.Policy {
 	return authhttp.Policy{Host: "api.qiniuapi.com", Endpoints: endpoints}
 }
 
+func kodoDiscoveryPolicy() authhttp.Policy {
+	return authhttp.Policy{Host: "uc.qiniuapi.com", Endpoints: []authhttp.Endpoint{
+		{Method: http.MethodGet, Path: kodo.BucketsPath, Name: "list_buckets"},
+	}}
+}
+
 func cdnPolicy() authhttp.Policy {
 	return authhttp.Policy{Host: "fusion.qiniuapi.com", Endpoints: []authhttp.Endpoint{
 		{Method: http.MethodPost, Path: "/v2/tune/monitoring/bandwidth", Name: "monitoring_bandwidth"},
@@ -291,6 +326,12 @@ func cdnPolicy() authhttp.Policy {
 		{Method: http.MethodPost, Path: "/v2/tune/loganalyze/reqcount", Name: "request_count"},
 		{Method: http.MethodPost, Path: "/v2/tune/loganalyze/statuscode", Name: "status_code"},
 		{Method: http.MethodPost, Path: "/v2/tune/loganalyze/hitmiss", Name: "hit_miss"},
+	}}
+}
+
+func cdnDiscoveryPolicy() authhttp.Policy {
+	return authhttp.Policy{Host: "api.qiniu.com", Endpoints: []authhttp.Endpoint{
+		{Method: http.MethodGet, Path: "/domain", Name: "list_domains"},
 	}}
 }
 
