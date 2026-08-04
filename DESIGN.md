@@ -20,9 +20,9 @@ The exporter is implemented in Go with background polling and in-memory snapshot
 
 ### 1.1 Monitoring-only Boundary
 
-The main process exports only operational, usage, and billing metrics. It uses fixed read-only inventory calls to discover accessible Kodo buckets and regions and active CDN domains, because these dimensions are required to query the statistics APIs. Enabled Kodo storage classes remain static configuration, and CDN regions returned by statistics APIs are accepted only from fixed, validated enums. Inventory responses are control input only: bucket/domain counts, configuration state, and management status are not exported as business metrics.
+The main process exports only operational inventory, usage, and billing metrics. It uses fixed read-only inventory calls to discover accessible Kodo buckets and regions and CDN domains, because these dimensions are needed both for operations visibility and statistics queries. Enabled Kodo storage classes remain static configuration, and CDN regions returned by statistics APIs are accepted only from fixed, validated enums. Complete discovery snapshots publish bounded bucket/domain counts and `*_info` series. These describe current resources; they are not counters or latency metrics for management API operations.
 
-The code does not implement any resource-management method for creating, deleting, updating, bringing online or offline, refreshing, prefetching, or canceling orders. Apart from the minimum read-only inventory needed for automatic discovery, it does not retrieve management details. It also does not export counts, results, or status metrics for those operations. Discovery, statistics, and billing clients use explicit endpoint allowlists and must not become general-purpose clients capable of calling arbitrary Qiniu APIs.
+The code does not implement any resource-management method for creating, deleting, updating, bringing online or offline, refreshing, prefetching, or canceling orders. Apart from the minimum read-only inventory needed for automatic discovery, it does not retrieve management details. It does not export request counts, results, latency, or errors for those management operations. The CDN inventory preserves the API's bounded `operatingState` field as resource state and clearly distinguishes it from an availability probe. Discovery, statistics, and billing clients use explicit endpoint allowlists and must not become general-purpose clients capable of calling arbitrary Qiniu APIs.
 
 Recommended technical baseline: Go 1.23+ (the minimum version supported by the current Prometheus Go client), with the Qiniu Go SDK pinned to a version verified during implementation. The latest version at the time of research was [`v7.27.0`](https://pkg.go.dev/github.com/qiniu/go-sdk/v7); do not use an unconstrained floating dependency.
 
@@ -32,7 +32,7 @@ Recommended technical baseline: Go 1.23+ (the minimum version supported by the c
 
 - One account per process is a deployment requirement. The configuration parser supports named credentials but cannot verify that different AK/SK pairs belong to the same account.
 - The default Prometheus scrape interval is 30 seconds. It reads cached snapshots and is independent of Qiniu upstream collection intervals.
-- Kodo bucket/region and active CDN-domain discovery is scheduled immediately after startup and refreshed every hour by default. An initial failure leaves an empty inventory without blocking HTTP readiness; a later failed refresh retains the previous complete inventory. A successful refresh atomically adds and removes resources.
+- Kodo bucket/region and CDN-domain discovery is scheduled immediately after startup and refreshed every hour by default. An initial failure leaves an empty inventory without blocking HTTP readiness; a later failed refresh retains the previous complete inventory. A successful refresh atomically adds and removes resources. Inventory and statistics catalogs use the same last-good resource set; discovery health and last-success age expose staleness.
 - The billing timezone is fixed to `Asia/Shanghai`. The timezones of Kodo and CDN time fields must be confirmed with a real account during the PoC. Until confirmed, the `statistics_timezone_verified=false` runtime gate for each module prevents statistics calls and publication; read-only resource discovery still runs.
 - The exporter only needs current state, the latest complete time bucket, the current-month estimate, the most recently finalized month, and a bounded current-year view of finalized monthly totals. It is not a historical ledger or reporting system.
 
@@ -43,7 +43,7 @@ Recommended technical baseline: Go 1.23+ (the minimum version supported by the c
 - Do not persist 24 months of billing details or use `month=YYYY-MM` as a continuously growing label.
 - Do not perform synthetic Kodo PUT/DELETE probes with write side effects inside the exporter.
 - Do not download or parse access logs in the main exporter. If needed later, build this as a separate log pipeline.
-- Do not expose order, cost-allocation, historical-ledger, or arbitrary resource-management APIs, even when they are read-only. The only control-plane exception is the fixed minimum inventory required for Kodo/CDN discovery, and no management metric is derived from it.
+- Do not expose order, cost-allocation, historical-ledger, or arbitrary resource-management APIs, even when they are read-only. The only control-plane exception is the fixed minimum inventory required for Kodo/CDN discovery; only bounded resource counts and identity/state info metrics are derived from it.
 
 ## 3. Overall Architecture
 
@@ -90,7 +90,7 @@ Prometheus generally recommends synchronous collection during a scrape, but perm
 |---|---|---|---|---|
 | Kodo discovery | `GET https://uc.qiniuapi.com/buckets?apiVersion=v4` | Qiniu v2; `X-Qiniu-Date` | Fixed, bounded, paginated read-only inventory client using the official SDK's v4 request shape | Account-wide listing may require broader read permission than bucket-scoped statistics |
 | Kodo statistics | `https://api.qiniuapi.com/v6/*` | Qiniu v2; `X-Qiniu-Date` | Custom read-only client + `auth.AddToken(TokenQiniu, req)` | Approximately 5 minutes of latency; public documentation does not specify QPS, maximum data points, or a consistent timezone |
-| CDN discovery | `https://api.qiniu.com/domain` | Qiniu v2; `X-Qiniu-Date` | Fixed, bounded, paginated read-only inventory client + official auth | Only active CDN domains are admitted; explicit `product=dcdn` entries are excluded; shares the account-level `api.qiniu.com` quota |
+| CDN discovery | `https://api.qiniu.com/domain` | Qiniu v2; `X-Qiniu-Date` | Fixed, bounded, paginated read-only inventory client + official auth | All CDN product domains are inventoried; only `operatingState=success` domains are admitted to statistics calls; explicit `product=dcdn` entries are excluded; shares the account-level `api.qiniu.com` quota |
 | CDN monitoring/analytics | `https://fusion.qiniuapi.com/v2/tune/*` | QBox | Fixed read-only REST client for core monitoring/analytics + official auth | 5-10 QPS; shares the quota with other callers using the same account |
 | Billing | Only four fixed GET endpoints: `balance-overview`, `bill/snapshot`, `respack/month-overview`, and `bill/detail` | Qiniu v2 | Custom fixed-GET client + official auth | QPS is unpublished; public documentation does not specify billing IAM actions |
 
@@ -120,7 +120,7 @@ Official entry point: [Kodo Data Statistics APIs](https://developer.qiniu.com/ko
 
 | Priority | Dataset | API | Purpose and conversion |
 |---|---|---|---|
-| P0 | Resource discovery | `GET https://uc.qiniuapi.com/buckets?apiVersion=v4&limit=100&marker=...` | List accessible buckets with their regions in one paginated read-only response; inventory is collector input only and produces no management metric |
+| P0 | Resource discovery | `GET https://uc.qiniuapi.com/buckets?apiVersion=v4&limit=100&marker=...` | List accessible buckets with their regions in one paginated read-only response; publish only the bounded inventory count and identity/region info |
 | P0 | Capacity | `/v6/space`, `/v6/space_line`, `/v6/space_intelligent_tiering`, `/v6/space_archive_ir`, `/v6/space_archive`, `/v6/space_deep_archive` | Point-in-time capacity for each storage class, in bytes; use fixed `g=5min` for the current day and select the latest complete point |
 | P0 | Object count | The six corresponding `/v6/count*` endpoints | Object count; these are not a single `/v6/count?storage_type=...` endpoint |
 | P0 | GET/egress | `/v6/blob_io` | `hits`; `flow_out`/`cdn_flow_out` in bytes; fixed `g=5min` |
@@ -152,6 +152,8 @@ per-bucket region lookup.
 
 | Metric | Type | Labels | Semantics |
 |---|---|---|---|
+| `qiniu_kodo_buckets` | Gauge | none | Number of buckets in the latest complete discovery snapshot; zero is distinct from unavailable |
+| `qiniu_kodo_bucket_info` | Gauge | `bucket,region` | Constant 1 for each bucket in the latest complete read-only inventory |
 | `qiniu_kodo_storage_bytes` | Gauge | `bucket,region,storage_class` | Storage capacity at the latest complete point |
 | `qiniu_kodo_objects` | Gauge | `bucket,region,storage_class` | Object count at the latest complete point |
 | `qiniu_kodo_requests_per_second` | Gauge | `bucket,region,operation` | Average request rate for the latest complete bucket; `operation` is `get`/`put` |
@@ -165,12 +167,13 @@ The public statistics APIs do not provide HTTP status codes, error rates, reques
 
 ## 6. CDN
 
-Qiniu's CDN APIs use two hosts and two authentication schemes. The exporter calls the read-only, paginated `GET /domain` inventory endpoint through `api.qiniu.com` with Qiniu v2 authentication, then calls only statistics endpoints through `fusion.qiniuapi.com` with QBox authentication. It does not call any domain mutation endpoint or export domain-management metrics. See the official [CDN API overview](https://developer.qiniu.com/fusion/13353/fusion-api-overview).
+Qiniu's CDN APIs use two hosts and two authentication schemes. The exporter calls the read-only, paginated `GET /domain` inventory endpoint through `api.qiniu.com` with Qiniu v2 authentication, then calls only statistics endpoints through `fusion.qiniuapi.com` with QBox authentication. It does not call any domain mutation endpoint or export telemetry about management API operations. See the official [CDN API overview](https://developer.qiniu.com/fusion/13353/fusion-api-overview).
 
 ### 6.1 Required APIs
 
 | Priority | Dataset | API | Key constraints |
 |---|---|---|---|
+| P0 | Resource discovery | `GET https://api.qiniu.com/domain` | Paginated read-only inventory; export CDN product domains and use only `operatingState=success` domains for statistics |
 | P0 | Real-time monitoring bandwidth | `POST /v2/tune/monitoring/bandwidth` | `domains` is a semicolon-delimited string, maximum 50; 5min/hour/day |
 | P0 | Real-time monitoring traffic | `POST /v2/tune/monitoring/flow` | Same as above; monitoring data is retained for 90 days |
 | P0 | Request volume | `POST /v2/tune/loganalyze/reqcount` | `domains` is an array; 5min/1hour/1day |
@@ -179,12 +182,14 @@ Qiniu's CDN APIs use two hosts and two authentication schemes. The exporter call
 
 CDN usage APIs accept at most 50 domains per request and preserve the domain dimension in responses, so they can be batched. Although analytics APIs accept up to 100 domains, their response structures do not include a domain dimension. To emit per-domain metrics, the MVP queries only one domain at a time. This aggregation behavior is a mandatory PoC check.
 
-Domains come exclusively from a complete successful discovery result and are sorted and deduplicated before admission. Discovery follows pagination with fixed page and resource limits and admits only domains in active operating state. A failed refresh retains the previous inventory. When batch monitoring encounters `400032`, use binary splitting to find invalid domains and negative-cache them until the next successful discovery refresh, while marking each as a collection error so one invalid domain cannot freeze the entire batch. Each round permits at most 16 batch attempts for binary splitting; each attempt may call bandwidth and flow at most once. Domains left unresolved when the budget is exhausted fail for that round but are not added to the negative cache, so the next round evaluates them again.
+Domains come exclusively from a complete successful discovery result and are sorted and deduplicated before admission. Discovery follows pagination with fixed page and resource limits. All CDN product domains are published in the inventory snapshot, while only domains with `operatingState=success` enter statistics catalogs. A failed refresh retains the previous inventory. When batch monitoring encounters `400032`, use binary splitting to find invalid domains and negative-cache them until the next successful discovery refresh, while marking each as a collection error so one invalid domain cannot freeze the entire batch. Each round permits at most 16 batch attempts for binary splitting; each attempt may call bandwidth and flow at most once. Domains left unresolved when the budget is exhausted fail for that round but are not added to the negative cache, so the next round evaluates them again.
 
 ### 6.2 P0 Metrics
 
 | Metric | Type | Labels | Semantics |
 |---|---|---|---|
+| `qiniu_cdn_domains` | Gauge | none | Number of CDN domains in the latest complete discovery snapshot; zero is distinct from unavailable |
+| `qiniu_cdn_domain_info` | Gauge | `domain,operating_state,product` | Constant 1 for each domain in the latest complete read-only inventory; `operating_state` is the latest management-operation state, not an availability probe |
 | `qiniu_cdn_monitoring_bandwidth_bits_per_second` | Gauge | `domain,region` | Bandwidth in the latest complete monitoring bucket |
 | `qiniu_cdn_monitoring_traffic_bytes_per_second` | Gauge | `domain,region` | Traffic in the latest complete monitoring bucket divided by bucket duration in seconds |
 | `qiniu_cdn_requests_per_second` | Gauge | `domain,region` | Average RPS in the latest complete `reqcount` bucket |
@@ -282,7 +287,7 @@ Dataset-level `collector_success` is 1 only when the latest poll succeeded for e
 Permitted business labels:
 
 - Kodo: `bucket`, `region`, `storage_class`, and bounded operation/route enums.
-- CDN: `domain`, `region`, and format-validated status-code keys returned by the API.
+- CDN: `domain`, `region`, bounded `operating_state`/`product` inventory enums, and format-validated status-code keys returned by the API.
 - Billing: `currency` and allowlisted `item`, `zone`, `available_time`, and `unit` values.
 
 The resource-pack allowlist contains at most 200 tuples, producing at most about 800 detailed business time series. If more are needed, split the exporter or monitoring scope and evaluate Prometheus cardinality first instead of relaxing the bounded limit. A CDN status-code response must not contain both an aggregate key and an exact key from the same class, such as `5xx` and `500`, because rules could double-count them.
@@ -320,7 +325,7 @@ Normal collection requests pass through the attempt-0 limiter and may use at mos
 
 | Dataset | Interval | Cold-start behavior |
 |---|---|---|
-| Kodo/CDN resource discovery | 60 minutes (`collection.intervals.discovery`) | Schedule immediately without blocking the HTTP server; start with an empty inventory after an initial failure and retain the previous complete inventory after later failed refreshes |
+| Kodo/CDN resource discovery | 60 minutes (`collection.intervals.discovery`) | Schedule immediately without blocking the HTTP server; publish a complete inventory snapshot, start empty after an initial failure, and retain the previous complete inventory after later failed refreshes while reporting discovery health and age |
 | Kodo capacity/object count | 30 minutes (`collection.intervals.kodo_capacity`) | Run at the dataset's first stable phase |
 | Kodo GET/PUT/egress | 30 minutes (`collection.intervals.kodo_activity`) | Run at the first stable phase and read only the latest safe five-minute bucket |
 | CDN monitoring | 30 minutes (`collection.intervals.cdn_monitoring`) | Run at the dataset's first stable phase over discovered domains |
@@ -337,7 +342,7 @@ After the initial stable phase, fixed-interval tasks add approximately +/-10% ra
 Before accepting each refreshed inventory, calculate demand from the discovered resource count and configured intervals. A rejected initial inventory leaves the exporter running with an empty resource set and a failed discovery self-metric; a rejected later refresh retains the previous complete set:
 
 - The conservative Kodo first-attempt demand is `ceil(B/100)/T_discovery + B × (4/T_activity + 2×S/T_capacity)` QPS, where `B` is the discovered bucket count, `S` is the enabled storage-class count, `T_discovery=min(5m, I_discovery/2)`, and each statistics timeout `T` is 80% of its configured interval. Omit the statistics terms until the timezone gate passes, but always budget the paginated discovery calls because they share the Kodo limiter. Reject inventories above 200 buckets.
-- The conservative CDN fusion demand is `2×ceil(D/50)/T_monitoring + 3×D/T_analytics` QPS, where `D` is the discovered domain count and each `T` is 80% of its configured interval. Error isolation is excluded from admission but remains subject to the same attempt-0 limiter and the per-round limit of 16 batch attempts. When `monitoring_units_verified=false`, do not call the two monitoring endpoints and omit the first term. Do not send CDN statistics requests until the timezone gate passes; read-only discovery remains enabled. Reject inventories above 2,000 active CDN domains.
+- Reject discovery responses containing more than 2,000 CDN product domains. For statistics admission, the conservative CDN fusion demand is `2×ceil(A/50)/T_monitoring + 3×A/T_analytics` QPS, where `A` is the subset with `operatingState=success` and each `T` is 80% of its configured interval. Error isolation is excluded from admission but remains subject to the same attempt-0 limiter and the per-round limit of 16 batch attempts. When `monitoring_units_verified=false`, do not call the two monitoring endpoints and omit the first term. Do not send CDN statistics requests until the timezone gate passes; read-only discovery and inventory publication remain enabled.
 - Steady-state billing call volume is low. Balance, daily APIs, current-year finalized-month backfill, and complete pagination remain subject to 1 QPS, burst 1, and concurrency 1. A finalized history cold start uses at most 11 distinct sequential monthly operations; each operation retains the existing maximum of two retries and the one-minute job deadline. Later runs request only missing months. Do not paginate when the resource-pack allowlist is empty.
 
 If estimated demand exceeds the configured first-attempt budget, reject that inventory with an explicit discovery error. Resolve this by increasing the corresponding collection interval, reducing enabled storage classes, disabling an unneeded module, or restricting the credential's resource scope. Higher protection ceilings require a reviewed code change and, where applicable, a higher Qiniu quota. Do not scale horizontally with multiple instances for the same account. If multiple instances are unavoidable, use a shared external distributed limiter and keep their aggregate budget within the account quota.
@@ -382,7 +387,7 @@ Recommended CDN P0 actions:
 - `cdn/GetStateCode`
 - `cdn/GetHitRate`
 
-The four statistics actions are service-level and cannot be scoped to individual domains through IAM. Automatic discovery therefore monitors every active domain visible to the selected credential. Use a deliberately scoped credential when account organization permits it. Do not grant `CreateDomain`, `DeleteDomain`, `OnlineDomain`, `OfflineDomain`, `Update*`, `Refresh`, or `Prefetch`. See [CDN IAM Actions](https://developer.qiniu.com/af/12493/cdn-actions).
+The four statistics actions are service-level and cannot be scoped to individual domains through IAM. Automatic discovery inventories every CDN domain visible to the selected credential and collects statistics for every domain in the successful operating state. Use a deliberately scoped credential when account organization permits it. Do not grant `CreateDomain`, `DeleteDomain`, `OnlineDomain`, `OfflineDomain`, `Update*`, `Refresh`, or `Prefetch`. See [CDN IAM Actions](https://developer.qiniu.com/af/12493/cdn-actions).
 
 Public billing documentation does not provide Billing/Financial IAM actions. Before enabling Billing, verify whether an IAM key can access these APIs. If only a primary-account AK/SK works:
 

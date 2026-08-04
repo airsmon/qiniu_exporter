@@ -130,12 +130,13 @@ func run(configPath string, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
+		inventory := &snapshot.Store[[]kodo.Bucket]{}
 		store := &snapshot.ResourceStore[[]kodo.GaugeSample]{}
-		registry.MustRegister(collector.NewKodo(store))
+		registry.MustRegister(collector.NewKodo(inventory, store))
 		if !cfg.Kodo.StatisticsTimezoneVerified {
 			logger.Warn("Kodo collectors disabled until statistics timezone semantics are verified against the Qiniu console")
 		}
-		if err := app.RegisterKodo(scheduler, client, discoverer, cfg, store, metrics); err != nil {
+		if err := app.RegisterKodo(scheduler, client, discoverer, cfg, inventory, store, metrics); err != nil {
 			return err
 		}
 	}
@@ -176,6 +177,7 @@ func run(configPath string, logger *slog.Logger) error {
 			return err
 		}
 		stores := collector.CDNStores{
+			Inventory:  &snapshot.Store[[]cdn.Domain]{},
 			Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 			Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
 		}

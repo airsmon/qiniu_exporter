@@ -9,16 +9,17 @@ Cloud.
 
 `qiniu_exporter` collects metrics from three Qiniu services:
 
-- **Kodo** (object storage): capacity, object count, request rate, and egress
-  rate.
-- **CDN**: bandwidth, traffic, request rate, HTTP response rate, and cache hit
-  metrics.
+- **Kodo** (object storage): automatically discovered bucket inventory and
+  count, capacity, object count, request rate, and egress rate.
+- **CDN**: automatically discovered domain inventory, count, and operating
+  state, plus bandwidth, traffic, request rate, HTTP response rate, and cache
+  hit metrics.
 - **Billing**: account balance, estimated cost, resource-pack usage, the most
   recent finalized month, and finalized monthly costs for the current year.
 
 The exporter calls only a fixed allowlist of read-only discovery, statistics,
-and billing endpoints. Discovery supplies the resource inventory used by the
-collectors; it is not exported as a management metric. The exporter does not
+and billing endpoints. Discovery exports bounded inventory state needed for
+operations, not request counters for management actions. The exporter does not
 create, update, delete, publish, refresh, prefetch, or otherwise change Qiniu
 resources.
 
@@ -53,14 +54,17 @@ their timestamps and units have been checked against the Qiniu console.
 ## Collectors and metrics
 
 Collectors are enabled through the YAML configuration file. The exporter
-discovers accessible Kodo buckets and regions and active CDN domains through
-read-only APIs at startup and periodically thereafter. Kodo storage classes
-and billing resource-pack tuples remain explicitly configured.
+discovers accessible Kodo buckets and regions and CDN domains through read-only
+APIs at startup and periodically thereafter. Only CDN domains whose latest
+Qiniu operating state is `success` are used for statistics calls. Kodo storage
+classes and billing resource-pack tuples remain explicitly configured.
 
 | Collector | Metric families | Labels | Enablement and behavior |
 | --- | --- | --- | --- |
+| Kodo inventory | `qiniu_kodo_buckets`, `qiniu_kodo_bucket_info` | `bucket`, `region` on the info metric | Read-only discovery runs independently of the Kodo statistics gate. |
 | Kodo storage | `qiniu_kodo_storage_bytes`, `qiniu_kodo_objects` | `bucket`, `region`, `storage_class` | Requires the Kodo timezone gate. |
 | Kodo activity | `qiniu_kodo_requests_per_second`, `qiniu_kodo_egress_bytes_per_second` | `bucket`, `region`, plus `operation` or `route` | Latest complete five-minute bucket; requires the Kodo timezone gate. |
+| CDN inventory | `qiniu_cdn_domains`, `qiniu_cdn_domain_info` | `domain`, `operating_state`, `product` on the info metric | Read-only discovery runs independently of the CDN statistics gates. `operating_state` describes the latest Qiniu domain-management operation, not availability. |
 | CDN monitoring | `qiniu_cdn_monitoring_bandwidth_bits_per_second`, `qiniu_cdn_monitoring_traffic_bytes_per_second` | `domain`, `region` | Requires the CDN timezone and monitoring-unit gates. |
 | CDN requests and responses | `qiniu_cdn_requests_per_second`, `qiniu_cdn_http_responses_per_second` | `domain,region`; responses also use `code` | Requires the CDN timezone gate; status-code labels are validated. |
 | CDN cache rates | `qiniu_cdn_cache_requests_per_second`, `qiniu_cdn_cache_traffic_bytes_per_second` | `domain,result` | `result` is `hit` or `miss`. |
@@ -202,9 +206,9 @@ collection:
 ```
 
 This is an intentionally safe skeleton: Billing is disabled and the Kodo/CDN
-verification gates are false, so it exposes exporter self-metrics and performs
-only read-only resource discovery, with no Kodo/CDN statistics samples. Enable
-only the modules and gates that have been validated for the account.
+verification gates are false, so it exposes exporter self-metrics and read-only
+Kodo/CDN inventory metrics, with no Kodo/CDN statistics samples. Enable only
+the modules and gates that have been validated for the account.
 
 When enabled, Kodo and CDN resource discovery is scheduled immediately after
 startup and every `collection.intervals.discovery` thereafter. Discovery does
@@ -212,7 +216,10 @@ not block the HTTP server: before the first success the inventory is empty and
 the failure is visible in exporter self-metrics. A successful refresh adds new
 resources and removes departed resources from future collection and exported
 series. If a later refresh fails, the exporter retains the last complete
-resource inventory.
+resource inventory. The bounded `*_info` and inventory-count metrics are
+published from the same complete last-good snapshot. Use the discovery
+collector's success and last-success timestamp metrics to detect stale
+inventory after failed refreshes.
 
 Start the exporter:
 

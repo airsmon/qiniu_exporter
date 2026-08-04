@@ -10,6 +10,7 @@ import (
 	"qiniu-exporter/internal/collector"
 	"qiniu-exporter/internal/config"
 	"qiniu-exporter/internal/poller"
+	"qiniu-exporter/internal/qiniu/cdn"
 	"qiniu-exporter/internal/qiniu/kodo"
 	"qiniu-exporter/internal/snapshot"
 	"qiniu-exporter/internal/telemetry"
@@ -58,12 +59,15 @@ type retryingCDNDiscoverer struct {
 	firstError error
 }
 
-func (d *retryingCDNDiscoverer) ListDomains(context.Context) ([]string, error) {
+func (d *retryingCDNDiscoverer) ListDomains(context.Context) ([]cdn.Domain, error) {
 	d.calls++
 	if d.calls == 1 {
 		return nil, d.firstError
 	}
-	return []string{"a.example.com", "b.example.com"}, nil
+	return []cdn.Domain{
+		{Name: "a.example.com", OperatingState: "success", Product: "cdn"},
+		{Name: "b.example.com", OperatingState: "success", Product: "cdn"},
+	}, nil
 }
 
 func TestKodoStartupDiscoveryFailureIsNonfatalAndRetried(t *testing.T) {
@@ -80,7 +84,8 @@ func TestKodoStartupDiscoveryFailureIsNonfatalAndRetried(t *testing.T) {
 	wantErr := errors.New("temporary Kodo discovery failure")
 	discoverer := &retryingKodoDiscoverer{firstError: wantErr}
 
-	if err := RegisterKodo(scheduler, nil, discoverer, cfg, &snapshot.ResourceStore[[]kodo.GaugeSample]{}, metrics); err != nil {
+	inventory := &snapshot.Store[[]kodo.Bucket]{}
+	if err := RegisterKodo(scheduler, nil, discoverer, cfg, inventory, &snapshot.ResourceStore[[]kodo.GaugeSample]{}, metrics); err != nil {
 		t.Fatalf("registration should not perform startup discovery: %v", err)
 	}
 	if discoverer.listCalls != 0 {
@@ -102,6 +107,9 @@ func TestKodoStartupDiscoveryFailureIsNonfatalAndRetried(t *testing.T) {
 	}
 	if discoverer.listCalls < 2 {
 		t.Fatalf("discovery calls=%d, want at least 2", discoverer.listCalls)
+	}
+	if buckets, _, ok := inventory.Load(time.Now().Add(time.Hour)); !ok || len(buckets) != 2 {
+		t.Fatalf("Kodo last-good inventory = %#v, ok=%v, want 2 retained buckets", buckets, ok)
 	}
 	assertAppGauge(t, registry, "qiniu_exporter_collector_success", map[string]string{
 		"module": "kodo", "collector": "discovery",
@@ -125,6 +133,7 @@ func TestCDNStartupDiscoveryFailureIsNonfatalAndRetried(t *testing.T) {
 	wantErr := errors.New("temporary CDN discovery failure")
 	discoverer := &retryingCDNDiscoverer{firstError: wantErr}
 	stores := collector.CDNStores{
+		Inventory:  &snapshot.Store[[]cdn.Domain]{},
 		Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
 	}
@@ -152,6 +161,9 @@ func TestCDNStartupDiscoveryFailureIsNonfatalAndRetried(t *testing.T) {
 	if discoverer.calls < 2 {
 		t.Fatalf("discovery calls=%d, want at least 2", discoverer.calls)
 	}
+	if domains, _, ok := stores.Inventory.Load(time.Now().Add(time.Hour)); !ok || len(domains) != 2 {
+		t.Fatalf("CDN last-good inventory = %#v, ok=%v, want 2 retained domains", domains, ok)
+	}
 	assertAppGauge(t, registry, "qiniu_exporter_collector_success", map[string]string{
 		"module": "cdn", "collector": "discovery",
 	}, 1)
@@ -162,6 +174,73 @@ func TestCDNStartupDiscoveryFailureIsNonfatalAndRetried(t *testing.T) {
 			}, 0)
 		}
 	}
+}
+
+func TestKodoInventoryIsPublishedWhileStatisticsAreGated(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := telemetry.New(registry, "test", "test")
+	observer := &discoveryObserver{metrics: metrics, results: make(chan discoveryJobResult, 1)}
+	scheduler := poller.New(observer)
+	cfg := discoveryRegistrationConfig()
+	cfg.Kodo.StatisticsTimezoneVerified = false
+	discoverer := &retryingKodoDiscoverer{}
+	discoverer.listCalls = 1 // Skip the fake discoverer's first-error branch.
+	inventory := &snapshot.Store[[]kodo.Bucket]{}
+	statistics := &snapshot.ResourceStore[[]kodo.GaugeSample]{}
+	registry.MustRegister(collector.NewKodo(inventory, statistics))
+
+	if err := RegisterKodo(scheduler, nil, discoverer, cfg, inventory, statistics, metrics); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	scheduler.Run(ctx)
+	result := waitForDiscoveryJob(t, observer.results)
+	cancel()
+	scheduler.Wait()
+	if result.err != nil {
+		t.Fatalf("Kodo discovery error = %v", result.err)
+	}
+	assertAppGauge(t, registry, "qiniu_kodo_buckets", nil, 2)
+	assertAppGauge(t, registry, "qiniu_kodo_bucket_info", map[string]string{"bucket": "bucket", "region": "z0"}, 1)
+	assertMetricFamilyAbsent(t, registry, "qiniu_kodo_storage_bytes")
+}
+
+func TestCDNInventoryIncludesInactiveDomainsWhileStatisticsAreGated(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	metrics := telemetry.New(registry, "test", "test")
+	observer := &discoveryObserver{metrics: metrics, results: make(chan discoveryJobResult, 1)}
+	scheduler := poller.New(observer)
+	cfg := discoveryRegistrationConfig()
+	cfg.CDN.StatisticsTimezoneVerified = false
+	discoverer := cdnDiscovererFunc(func(context.Context) ([]cdn.Domain, error) {
+		return []cdn.Domain{
+			{Name: "active.example.com", OperatingState: "success", Product: "cdn"},
+			{Name: "offlined.example.com", OperatingState: "offlined", Product: "cdn"},
+		}, nil
+	})
+	stores := collector.CDNStores{
+		Inventory:  &snapshot.Store[[]cdn.Domain]{},
+		Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
+		Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
+	}
+	registry.MustRegister(collector.NewCDN(stores))
+
+	if err := RegisterCDN(scheduler, nil, discoverer, cfg, stores, metrics); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	scheduler.Run(ctx)
+	result := waitForDiscoveryJob(t, observer.results)
+	cancel()
+	scheduler.Wait()
+	if result.err != nil {
+		t.Fatalf("CDN discovery error = %v", result.err)
+	}
+	assertAppGauge(t, registry, "qiniu_cdn_domains", nil, 2)
+	assertAppGauge(t, registry, "qiniu_cdn_domain_info", map[string]string{
+		"domain": "offlined.example.com", "operating_state": "offlined", "product": "cdn",
+	}, 1)
+	assertMetricFamilyAbsent(t, registry, "qiniu_cdn_requests_per_second")
 }
 
 func discoveryRegistrationConfig() *config.Config {
@@ -227,4 +306,17 @@ func assertAppGauge(t *testing.T, registry *prometheus.Registry, familyName stri
 		}
 	}
 	t.Fatalf("gauge %s%v not found", familyName, labels)
+}
+
+func assertMetricFamilyAbsent(t *testing.T, registry *prometheus.Registry, familyName string) {
+	t.Helper()
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() == familyName {
+			t.Fatalf("metric family %s must be absent", familyName)
+		}
+	}
 }

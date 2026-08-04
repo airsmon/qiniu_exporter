@@ -22,12 +22,16 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 		{Kind: kodo.GaugeRequestsPerSecond, Bucket: "bucket", Region: "z0", Operation: kodo.OperationGet, Value: 3},
 		{Kind: kodo.GaugeEgressBytesPerSecond, Bucket: "bucket", Region: "z0", Route: kodo.RouteDirect, Value: 4},
 	}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
-	registry.MustRegister(NewKodo(kodoStore))
+	kodoInventory := &snapshot.Store[[]kodo.Bucket]{}
+	kodoInventory.Publish([]kodo.Bucket{{Name: "bucket", Region: "z0"}}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
+	registry.MustRegister(NewKodo(kodoInventory, kodoStore))
 
 	cdnStores := CDNStores{
+		Inventory:  &snapshot.Store[[]cdn.Domain]{},
 		Monitoring: &snapshot.ResourceStore[CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[CDNAnalyticsSnapshot]{},
 	}
+	cdnStores.Inventory.Publish([]cdn.Domain{{Name: "cdn.example.com", OperatingState: "success", Product: "cdn"}}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
 	cdnStores.Monitoring.Publish("cdn.example.com", CDNMonitoringSnapshot{
 		Bandwidth: []cdn.BandwidthSample{{Domain: "cdn.example.com", Region: cdn.RegionChina, BitsPerSecond: 100}},
 		Traffic:   []cdn.TrafficSample{{Domain: "cdn.example.com", Region: cdn.RegionChina, BytesPerSecond: 200}},
@@ -87,7 +91,9 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 		}
 	}
 	want := []string{
+		"qiniu_kodo_buckets", "qiniu_kodo_bucket_info",
 		"qiniu_kodo_storage_bytes", "qiniu_kodo_objects", "qiniu_kodo_requests_per_second", "qiniu_kodo_egress_bytes_per_second",
+		"qiniu_cdn_domains", "qiniu_cdn_domain_info",
 		"qiniu_cdn_monitoring_bandwidth_bits_per_second", "qiniu_cdn_monitoring_traffic_bytes_per_second", "qiniu_cdn_requests_per_second", "qiniu_cdn_http_responses_per_second",
 		"qiniu_billing_available_balance", "qiniu_billing_unpaid_amount", "qiniu_billing_resource_pack_records", "qiniu_billing_resource_pack_remaining_ratio",
 		"qiniu_billing_last_finalized_cost", "qiniu_billing_current_year_monthly_finalized_cost",
@@ -102,6 +108,12 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 	}
 	if monthlyLabels["01"] != 1 || monthlyLabels["02"] != 2 {
 		t.Fatalf("current-year monthly finalized values = %#v, want 01=1 and 02=2", monthlyLabels)
+	}
+	if got := names["qiniu_kodo_bucket_info"]; got != 1 {
+		t.Fatalf("Kodo bucket inventory series = %d, want 1", got)
+	}
+	if got := names["qiniu_cdn_domain_info"]; got != 1 {
+		t.Fatalf("CDN domain inventory series = %d, want 1", got)
 	}
 }
 

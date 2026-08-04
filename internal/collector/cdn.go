@@ -20,6 +20,7 @@ type CDNAnalyticsSnapshot struct {
 }
 
 type CDNStores struct {
+	Inventory  *snapshot.Store[[]cdn.Domain]
 	Monitoring *snapshot.ResourceStore[CDNMonitoringSnapshot]
 	Analytics  *snapshot.ResourceStore[CDNAnalyticsSnapshot]
 }
@@ -27,6 +28,8 @@ type CDNStores struct {
 type CDNCollector struct {
 	stores CDNStores
 
+	domains         *prometheus.Desc
+	domainInfo      *prometheus.Desc
 	bandwidth       *prometheus.Desc
 	traffic         *prometheus.Desc
 	requests        *prometheus.Desc
@@ -40,6 +43,16 @@ type CDNCollector struct {
 func NewCDN(stores CDNStores) *CDNCollector {
 	return &CDNCollector{
 		stores: stores,
+		domains: prometheus.NewDesc(
+			"qiniu_cdn_domains",
+			"Number of CDN domains visible to the configured credentials in the latest successful discovery.",
+			nil, nil,
+		),
+		domainInfo: prometheus.NewDesc(
+			"qiniu_cdn_domain_info",
+			"Information about a CDN domain visible in the latest successful discovery.",
+			[]string{"domain", "operating_state", "product"}, nil,
+		),
 		bandwidth: prometheus.NewDesc(
 			"qiniu_cdn_monitoring_bandwidth_bits_per_second",
 			"Latest complete Qiniu CDN monitoring bandwidth bucket.",
@@ -84,6 +97,8 @@ func NewCDN(stores CDNStores) *CDNCollector {
 }
 
 func (c *CDNCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.domains
+	ch <- c.domainInfo
 	ch <- c.bandwidth
 	ch <- c.traffic
 	ch <- c.requests
@@ -96,6 +111,12 @@ func (c *CDNCollector) Describe(ch chan<- *prometheus.Desc) {
 
 func (c *CDNCollector) Collect(ch chan<- prometheus.Metric) {
 	now := time.Now()
+	if domains, _, ok := c.stores.Inventory.Load(now); ok {
+		ch <- prometheus.MustNewConstMetric(c.domains, prometheus.GaugeValue, float64(len(domains)))
+		for _, domain := range domains {
+			ch <- prometheus.MustNewConstMetric(c.domainInfo, prometheus.GaugeValue, 1, domain.Name, domain.OperatingState, domain.Product)
+		}
+	}
 	for _, value := range c.stores.Monitoring.Load(now) {
 		for _, sample := range value.Data.Bandwidth {
 			ch <- prometheus.MustNewConstMetric(c.bandwidth, prometheus.GaugeValue, sample.BitsPerSecond, sample.Domain, sample.Region)

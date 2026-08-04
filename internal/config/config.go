@@ -360,20 +360,27 @@ func (c *Config) ValidateKodoResourceCount(resourceCount int) error {
 }
 
 func (c *Config) ValidateCDNResourceCount(resourceCount int) error {
-	if resourceCount < 0 {
-		return errors.New("cdn discovered resource count must not be negative")
+	return c.ValidateCDNResourceCounts(resourceCount, resourceCount)
+}
+
+func (c *Config) ValidateCDNResourceCounts(discoveredCount, activeCount int) error {
+	if discoveredCount < 0 || activeCount < 0 {
+		return errors.New("cdn discovered and active resource counts must not be negative")
 	}
-	if resourceCount > maxDiscoveredCDNDomains {
-		return fmt.Errorf("cdn discovery exceeds the safety limit of %d active domains", maxDiscoveredCDNDomains)
+	if activeCount > discoveredCount {
+		return errors.New("cdn active resource count must not exceed discovered resource count")
 	}
-	if !c.CDN.Enabled || !c.CDN.StatisticsTimezoneVerified || resourceCount == 0 {
+	if discoveredCount > maxDiscoveredCDNDomains {
+		return fmt.Errorf("cdn discovery exceeds the safety limit of %d domain resources", maxDiscoveredCDNDomains)
+	}
+	if !c.CDN.Enabled || !c.CDN.StatisticsTimezoneVerified || activeCount == 0 {
 		return nil
 	}
 	utilization := c.Collection.FirstRequestUtilization
-	domains := float64(resourceCount)
+	domains := float64(activeCount)
 	required := 3 * domains / collectionTimeout(c.Collection.Intervals.CDNAnalytics.Value()).Seconds()
 	if c.CDN.MonitoringUnitsVerified {
-		batches := float64((resourceCount + 49) / 50)
+		batches := float64((activeCount + 49) / 50)
 		required += 2 * batches / collectionTimeout(c.Collection.Intervals.CDNMonitoring.Value()).Seconds()
 	}
 	if required > c.Collection.CDNFusionMaxQPS*utilization {

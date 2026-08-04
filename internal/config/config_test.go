@@ -188,6 +188,21 @@ func TestCDNFusionAdmissionIsSkippedForUnverifiedStatistics(t *testing.T) {
 	}
 }
 
+func TestCDNAdmissionUsesOnlyActiveDomainsForStatisticsBudget(t *testing.T) {
+	cfg := defaults()
+	cfg.CDN.Enabled = true
+	cfg.CDN.StatisticsTimezoneVerified = true
+	cfg.CDN.MonitoringUnitsVerified = false
+	cfg.Collection.CDNFusionMaxQPS = 0.01
+
+	if err := cfg.ValidateCDNResourceCounts(1_000, 1); err != nil {
+		t.Fatalf("inactive inventory must not consume the statistics call budget: %v", err)
+	}
+	if err := cfg.ValidateCDNResourceCounts(1, 2); err == nil || !strings.Contains(err.Error(), "must not exceed") {
+		t.Fatalf("expected active/discovered consistency error, got %v", err)
+	}
+}
+
 func TestDurationAcceptsDays(t *testing.T) {
 	var duration Duration
 	if err := duration.UnmarshalText([]byte("40d")); err != nil {

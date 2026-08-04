@@ -23,19 +23,28 @@ with `var-qiniu_account=production`.
 
 The collection-gates table distinguishes persistent validation or allowlist
 gates from scheduler skips that occurred in the selected time range. Kodo and
-CDN business panels are expected to have no data while their timezone or unit
-gate is active; successful read-only resource discovery remains visible in the
-exporter health panels.
+CDN statistics panels are expected to have no data while their timezone or unit
+gate is active. Their dedicated inventory panels still show automatically
+discovered bucket/domain counts, names, regions, products, and bounded domain
+operating states. A CDN operating state is the latest Qiniu domain-management
+operation state, not an availability probe.
 
 Resource-pack quantities include a `unit` label and must not be aggregated
 across different units. The resource-pack status panel distinguishes an empty
 allowlist, an enabled collector with zero records, and unavailable data.
 
+The Billing snapshot uses instant queries for available balance, unpaid amount,
+the current estimate, and the last finalized cost. Billing periods are shown as
+three dates rather than a time series. The `currency` variable defaults to the
+regex All value (`.*`), so older dashboard links containing
+`var-currency=$__all` continue to return data.
+
 The current-year Billing panels consume
 `qiniu_billing_current_year_monthly_finalized_cost`. It is an instant Gauge
 with `currency` and a zero-padded `month="01".."12"` label for finalized months
-in the current `Asia/Shanghai` calendar year. The bar gauge, YTD total, monthly
-average, and finalized-month count exclude the current-period estimate.
+in the current `Asia/Shanghai` calendar year. A horizontal monthly bar gauge,
+YTD total, monthly average, and finalized-month count exclude the current-period
+estimate.
 
 ## Provisioning
 

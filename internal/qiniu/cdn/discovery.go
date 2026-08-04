@@ -29,6 +29,14 @@ type DomainDiscoveryClient struct {
 	endpoint *url.URL
 }
 
+// Domain is one CDN resource returned by Qiniu's domain-list endpoint.
+// Product is normalized to "cdn" when older responses omit it.
+type Domain struct {
+	Name           string `json:"name"`
+	OperatingState string `json:"operatingState"`
+	Product        string `json:"product"`
+}
+
 // NewDomainDiscoveryClient creates a read-only CDN domain discovery client.
 // An empty endpoint selects DefaultDomainDiscoveryURL.
 func NewDomainDiscoveryClient(doer Doer, endpoint string) (*DomainDiscoveryClient, error) {
@@ -53,10 +61,11 @@ func NewDomainDiscoveryClient(doer Doer, endpoint string) (*DomainDiscoveryClien
 	return &DomainDiscoveryClient{doer: doer, endpoint: parsed}, nil
 }
 
-// ListDomains returns the unique, active CDN domain names visible to the
-// supplied credentials. Domains in any state other than success are ignored.
-func (c *DomainDiscoveryClient) ListDomains(ctx context.Context) ([]string, error) {
-	domains := make([]string, 0)
+// ListDomains returns every unique CDN domain visible to the supplied
+// credentials, including domains that are not currently active. DCDN resources
+// are excluded because this exporter module targets the CDN APIs.
+func (c *DomainDiscoveryClient) ListDomains(ctx context.Context) ([]Domain, error) {
+	domains := make([]Domain, 0)
 	seenDomains := make(map[string]struct{})
 	seenMarkers := make(map[string]struct{})
 	marker := ""
@@ -91,13 +100,18 @@ func (c *DomainDiscoveryClient) ListDomains(ctx context.Context) ([]string, erro
 			seenDomains[key] = struct{}{}
 			// Older list responses omit product. Explicit DCDN entries are not
 			// enrolled because the selected statistics endpoints are CDN APIs.
-			if domain.OperatingState == "success" && domain.Product != "dcdn" {
-				domains = append(domains, domain.Name)
+			if domain.Product == "" {
+				domain.Product = "cdn"
+			}
+			if domain.Product != "dcdn" {
+				domains = append(domains, domain)
 			}
 		}
 
 		if page.Marker == "" {
-			sort.Strings(domains)
+			sort.Slice(domains, func(left, right int) bool {
+				return domains[left].Name < domains[right].Name
+			})
 			return domains, nil
 		}
 		if err := validateDiscoveryMarker(page.Marker); err != nil {
@@ -125,13 +139,7 @@ func (c *DomainDiscoveryClient) ListDomains(ctx context.Context) ([]string, erro
 
 type domainDiscoveryPage struct {
 	Marker  string
-	Domains []domainDiscoveryEntry
-}
-
-type domainDiscoveryEntry struct {
-	Name           string `json:"name"`
-	OperatingState string `json:"operatingState"`
-	Product        string `json:"product"`
+	Domains []Domain
 }
 
 func (c *DomainDiscoveryClient) fetchDomainPage(ctx context.Context, marker string) (domainDiscoveryPage, error) {

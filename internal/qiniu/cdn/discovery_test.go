@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func TestDomainDiscoveryClientPaginatesAndReturnsOnlySuccessfulDomains(t *testing.T) {
+func TestDomainDiscoveryClientPaginatesAndReturnsCDNInventory(t *testing.T) {
 	requests := 0
 	doer := doerFunc(func(request *http.Request) (*http.Response, error) {
 		requests++
@@ -67,7 +67,14 @@ func TestDomainDiscoveryClientPaginatesAndReturnsOnlySuccessfulDomains(t *testin
 	if err != nil {
 		t.Fatalf("ListDomains: %v", err)
 	}
-	if want := []string{".wildcard.example.com", "a.example.com", "z.example.com"}; !reflect.DeepEqual(domains, want) {
+	want := []Domain{
+		{Name: ".wildcard.example.com", OperatingState: "success", Product: "cdn"},
+		{Name: "a.example.com", OperatingState: "success", Product: "cdn"},
+		{Name: "offlined.example.com", OperatingState: "offlined", Product: "cdn"},
+		{Name: "pending.example.com", OperatingState: "processing", Product: "cdn"},
+		{Name: "z.example.com", OperatingState: "success", Product: "cdn"},
+	}
+	if !reflect.DeepEqual(domains, want) {
 		t.Fatalf("domains = %#v, want %#v", domains, want)
 	}
 	if requests != 2 {

@@ -39,6 +39,7 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 			List []struct {
 				Name       string          `json:"name"`
 				Definition string          `json:"definition"`
+				AllValue   string          `json:"allValue"`
 				Current    json.RawMessage `json:"current"`
 				Multi      bool            `json:"multi"`
 				IncludeAll bool            `json:"includeAll"`
@@ -65,8 +66,8 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 	if dashboard.Title == "" || len(dashboard.Panels) == 0 {
 		t.Fatal("Grafana dashboard title or panels are empty")
 	}
-	if dashboard.Version < 2 {
-		t.Fatalf("Grafana dashboard version = %d, want at least 2", dashboard.Version)
+	if dashboard.Version < 3 {
+		t.Fatalf("Grafana dashboard version = %d, want at least 3", dashboard.Version)
 	}
 
 	variables := make(map[string]int, len(dashboard.Templating.List))
@@ -83,6 +84,23 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 	}
 	if jobIndex, ok := variables["job"]; !ok || accountIndex >= jobIndex {
 		t.Fatal("qiniu_account must precede downstream job variables")
+	}
+	for name, metric := range map[string]string{
+		"bucket":   "qiniu_kodo_bucket_info",
+		"domain":   "qiniu_cdn_domain_info",
+		"currency": "qiniu_billing_",
+	} {
+		index, ok := variables[name]
+		if !ok {
+			t.Fatalf("Grafana dashboard has no %s variable", name)
+		}
+		variable := dashboard.Templating.List[index]
+		if !variable.Multi || !variable.IncludeAll || variable.AllValue != ".*" || !strings.Contains(string(variable.Current), "$__all") {
+			t.Fatalf("Grafana variable %q must default to a regex All selection: %#v", name, variable)
+		}
+		if !strings.Contains(variable.Definition, metric) {
+			t.Fatalf("Grafana variable %q is not sourced from %q: %s", name, metric, variable.Definition)
+		}
 	}
 	for _, variable := range dashboard.Templating.List {
 		if variable.Name == "DS_PROMETHEUS" || variable.Name == "qiniu_account" {
@@ -166,9 +184,39 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 	if _, exists := panelByID(31).FieldConfig.Defaults["thresholds"]; exists {
 		t.Fatal("balance and unpaid amount must not share generic thresholds")
 	}
-	for _, id := range []int{8, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 34, 35, 36} {
+	for _, id := range []int{8, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25, 26, 27, 28, 31, 33, 34, 35, 36, 39, 40, 41, 42, 43} {
 		if panelByID(id).Description == "" {
 			t.Fatalf("Grafana panel %d must explain gated or disabled no-data semantics", id)
+		}
+	}
+	for id, metric := range map[int]string{
+		39: "qiniu_kodo_buckets",
+		40: "qiniu_kodo_bucket_info",
+		41: "qiniu_cdn_domains",
+		42: "qiniu_cdn_domain_info",
+		43: "qiniu_cdn_domain_info",
+	} {
+		panel := panelByID(id)
+		if len(panel.Targets) != 1 || !panel.Targets[0].Instant || !strings.Contains(panel.Targets[0].Expression, metric) {
+			t.Fatalf("inventory panel %d is invalid: %#v", id, panel)
+		}
+	}
+	billingSnapshot := panelByID(31)
+	if billingSnapshot.Type != "stat" || len(billingSnapshot.Targets) != 4 {
+		t.Fatalf("Billing snapshot panel is invalid: %#v", billingSnapshot)
+	}
+	for _, target := range billingSnapshot.Targets {
+		if !target.Instant || !strings.Contains(target.Expression, "max by (qiniu_account, currency)") {
+			t.Fatalf("invalid Billing snapshot query: %#v", target)
+		}
+	}
+	billingPeriods := panelByID(33)
+	if billingPeriods.Type != "stat" || len(billingPeriods.Targets) != 3 {
+		t.Fatalf("Billing periods panel is invalid: %#v", billingPeriods)
+	}
+	for _, target := range billingPeriods.Targets {
+		if !target.Instant || !strings.Contains(target.Expression, "max by (qiniu_account)") || !strings.Contains(target.Expression, "_timestamp_seconds") {
+			t.Fatalf("invalid Billing-period query: %#v", target)
 		}
 	}
 	monthly := panelByID(37)

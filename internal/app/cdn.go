@@ -16,7 +16,7 @@ import (
 )
 
 type CDNDiscoverer interface {
-	ListDomains(context.Context) ([]string, error)
+	ListDomains(context.Context) ([]cdn.Domain, error)
 }
 
 type cdnPartialErrors map[string]error
@@ -42,6 +42,9 @@ func RegisterCDN(
 	if discoverer == nil {
 		return fmt.Errorf("CDN discoverer is required")
 	}
+	if stores.Inventory == nil {
+		return fmt.Errorf("CDN inventory store is required")
+	}
 	if !cfg.CDN.StatisticsTimezoneVerified {
 		metrics.ObserveSkipped("cdn/analytics", "timezone_unverified")
 		metrics.ObserveSkipped("cdn/monitoring", "timezone_unverified")
@@ -55,15 +58,24 @@ func RegisterCDN(
 	var badDomainsMu sync.RWMutex
 	catalog := newResourceCatalog[string](nil)
 	reconcile := func(ctx context.Context) error {
-		domains, err := discoverer.ListDomains(ctx)
+		domainInventory, err := discoverer.ListDomains(ctx)
 		if err != nil {
 			return err
 		}
-		if err := cfg.ValidateCDNResourceCount(len(domains)); err != nil {
+		domains := make([]string, 0, len(domainInventory))
+		for _, domain := range domainInventory {
+			if domain.OperatingState == "success" {
+				domains = append(domains, domain.Name)
+			}
+		}
+		if err := cfg.ValidateCDNResourceCounts(len(domainInventory), len(domains)); err != nil {
 			return err
 		}
 		stores.Monitoring.Retain(domains)
 		stores.Analytics.Retain(domains)
+		stores.Inventory.Publish(domainInventory, snapshot.Meta{
+			CollectedAt: time.Now(),
+		})
 		badDomainsMu.Lock()
 		clear(badDomains)
 		badDomainsMu.Unlock()

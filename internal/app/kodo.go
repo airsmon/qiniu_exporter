@@ -29,11 +29,15 @@ func RegisterKodo(
 	client *kodo.Client,
 	discoverer KodoDiscoverer,
 	cfg *config.Config,
+	inventory *snapshot.Store[[]kodo.Bucket],
 	store *snapshot.ResourceStore[[]kodo.GaugeSample],
 	metrics *telemetry.Metrics,
 ) error {
 	if discoverer == nil {
 		return fmt.Errorf("kodo discoverer is required")
+	}
+	if inventory == nil {
+		return fmt.Errorf("kodo inventory store is required")
 	}
 	if !cfg.Kodo.StatisticsTimezoneVerified {
 		metrics.ObserveSkipped("kodo/capacity", "timezone_unverified")
@@ -66,6 +70,9 @@ func RegisterKodo(
 			retained = append(retained, "capacity/"+resource, "activity/"+resource)
 		}
 		store.Retain(retained)
+		inventory.Publish(buckets, snapshot.Meta{
+			CollectedAt: time.Now(),
+		})
 		if cfg.Kodo.StatisticsTimezoneVerified {
 			metrics.ReplaceResources("kodo", "capacity", resources, cfg.Collection.StaleAfter.Realtime.Value())
 			metrics.ReplaceResources("kodo", "activity", resources, cfg.Collection.StaleAfter.Realtime.Value())

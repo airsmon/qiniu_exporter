@@ -28,9 +28,9 @@ type appDoerFunc func(*http.Request) (*http.Response, error)
 
 func (f appDoerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }
 
-type cdnDiscovererFunc func(context.Context) ([]string, error)
+type cdnDiscovererFunc func(context.Context) ([]cdn.Domain, error)
 
-func (f cdnDiscovererFunc) ListDomains(ctx context.Context) ([]string, error) { return f(ctx) }
+func (f cdnDiscovererFunc) ListDomains(ctx context.Context) ([]cdn.Domain, error) { return f(ctx) }
 
 func TestMonitoringIsolatesAndCachesInvalidDomain(t *testing.T) {
 	location, err := time.LoadLocation("Asia/Shanghai")
@@ -251,13 +251,16 @@ func TestUnverifiedMonitoringUnitsMakeNoMonitoringRequest(t *testing.T) {
 	metrics := telemetry.New(registry, "test", "test")
 	scheduler := poller.New(metrics)
 	stores := collector.CDNStores{
+		Inventory:  &snapshot.Store[[]cdn.Domain]{},
 		Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
 	}
 	cfg := testRealtimeConfig()
 	cfg.CDN.StatisticsTimezoneVerified = true
 	cfg.CDN.MonitoringUnitsVerified = false
-	discoverer := cdnDiscovererFunc(func(context.Context) ([]string, error) { return []string{"cdn.example.com"}, nil })
+	discoverer := cdnDiscovererFunc(func(context.Context) ([]cdn.Domain, error) {
+		return []cdn.Domain{{Name: "cdn.example.com", OperatingState: "success", Product: "cdn"}}, nil
+	})
 	if err := RegisterCDN(scheduler, client, discoverer, cfg, stores, metrics); err != nil {
 		t.Fatal(err)
 	}
@@ -302,13 +305,16 @@ func TestUnverifiedStatisticsTimezoneMakesNoCDNRequestOrFailureState(t *testing.
 	registry := prometheus.NewRegistry()
 	metrics := telemetry.New(registry, "test", "test")
 	stores := collector.CDNStores{
+		Inventory:  &snapshot.Store[[]cdn.Domain]{},
 		Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
 	}
 	cfg := testRealtimeConfig()
 	cfg.CDN.StatisticsTimezoneVerified = false
 	cfg.CDN.MonitoringUnitsVerified = true
-	discoverer := cdnDiscovererFunc(func(context.Context) ([]string, error) { return []string{"cdn.example.com"}, nil })
+	discoverer := cdnDiscovererFunc(func(context.Context) ([]cdn.Domain, error) {
+		return []cdn.Domain{{Name: "cdn.example.com", OperatingState: "success", Product: "cdn"}}, nil
+	})
 	if err := RegisterCDN(poller.New(metrics), client, discoverer, cfg, stores, metrics); err != nil {
 		t.Fatal(err)
 	}

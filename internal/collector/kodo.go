@@ -9,17 +9,31 @@ import (
 )
 
 type KodoCollector struct {
-	store *snapshot.ResourceStore[[]kodo.GaugeSample]
+	inventory *snapshot.Store[[]kodo.Bucket]
+	store     *snapshot.ResourceStore[[]kodo.GaugeSample]
 
+	buckets      *prometheus.Desc
+	bucketInfo   *prometheus.Desc
 	storageBytes *prometheus.Desc
 	objects      *prometheus.Desc
 	requests     *prometheus.Desc
 	egress       *prometheus.Desc
 }
 
-func NewKodo(store *snapshot.ResourceStore[[]kodo.GaugeSample]) *KodoCollector {
+func NewKodo(inventory *snapshot.Store[[]kodo.Bucket], store *snapshot.ResourceStore[[]kodo.GaugeSample]) *KodoCollector {
 	return &KodoCollector{
-		store: store,
+		inventory: inventory,
+		store:     store,
+		buckets: prometheus.NewDesc(
+			"qiniu_kodo_buckets",
+			"Number of Kodo buckets visible to the configured credentials in the latest successful discovery.",
+			nil, nil,
+		),
+		bucketInfo: prometheus.NewDesc(
+			"qiniu_kodo_bucket_info",
+			"Information about a Kodo bucket visible in the latest successful discovery.",
+			[]string{"bucket", "region"}, nil,
+		),
 		storageBytes: prometheus.NewDesc(
 			"qiniu_kodo_storage_bytes",
 			"Latest complete Kodo storage capacity reported by Qiniu.",
@@ -44,6 +58,8 @@ func NewKodo(store *snapshot.ResourceStore[[]kodo.GaugeSample]) *KodoCollector {
 }
 
 func (c *KodoCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- c.buckets
+	ch <- c.bucketInfo
 	ch <- c.storageBytes
 	ch <- c.objects
 	ch <- c.requests
@@ -51,7 +67,14 @@ func (c *KodoCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *KodoCollector) Collect(ch chan<- prometheus.Metric) {
-	for _, value := range c.store.Load(time.Now()) {
+	now := time.Now()
+	if buckets, _, ok := c.inventory.Load(now); ok {
+		ch <- prometheus.MustNewConstMetric(c.buckets, prometheus.GaugeValue, float64(len(buckets)))
+		for _, bucket := range buckets {
+			ch <- prometheus.MustNewConstMetric(c.bucketInfo, prometheus.GaugeValue, 1, bucket.Name, bucket.Region)
+		}
+	}
+	for _, value := range c.store.Load(now) {
 		for _, sample := range value.Data {
 			switch sample.Kind {
 			case kodo.GaugeStorageBytes:
