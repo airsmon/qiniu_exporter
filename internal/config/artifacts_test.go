@@ -70,8 +70,8 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 	if dashboard.Title == "" || len(dashboard.Panels) == 0 {
 		t.Fatal("Grafana dashboard title or panels are empty")
 	}
-	if dashboard.Version < 8 {
-		t.Fatalf("Grafana dashboard version = %d, want at least 8", dashboard.Version)
+	if dashboard.Version < 9 {
+		t.Fatalf("Grafana dashboard version = %d, want at least 9", dashboard.Version)
 	}
 
 	variables := make(map[string]int, len(dashboard.Templating.List))
@@ -261,6 +261,9 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 		if !strings.Contains(bucketPresentation, token) {
 			t.Fatalf("Bucket Inventory presentation is missing %q: %s", token, bucketPresentation)
 		}
+	}
+	if strings.Count(bucketPresentation, `"locale"`) < 2 {
+		t.Fatal("Bucket Inventory object and request counts must use exact locale formatting")
 	}
 	stateSummary := panelByID(42)
 	if stateSummary.Type != "stat" || stateSummary.GridPos["x"] != 4 || stateSummary.GridPos["w"] != 8 || !strings.Contains(string(stateSummary.Options["colorMode"]), "background") {

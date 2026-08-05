@@ -496,7 +496,7 @@
           {
             "matcher": {"id": "byName", "options": "Today's Objects"},
             "properties": [
-              {"id": "unit", "value": "short"},
+              {"id": "unit", "value": "locale"},
               {"id": "decimals", "value": 0},
               {"id": "custom.width", "value": 140}
             ]
@@ -512,7 +512,7 @@
           {
             "matcher": {"id": "byName", "options": "Month PUT Requests"},
             "properties": [
-              {"id": "unit", "value": "short"},
+              {"id": "unit", "value": "locale"},
               {"id": "decimals", "value": 0},
               {"id": "custom.width", "value": 170}
             ]
@@ -1591,6 +1591,6 @@
   "timezone": "browser",
   "title": "Qiniu Exporter Overview",
   "uid": "qiniu-exporter-overview",
-  "version": 8,
+  "version": 9,
   "weekStart": ""
 }
