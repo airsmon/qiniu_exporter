@@ -450,7 +450,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "description": "Complete automatically discovered bucket inventory. Storage Region is derived from Qiniu's native Region ID; unknown future IDs remain visible. Access Control comes from the same read-only discovery response.",
+      "description": "Bucket metadata plus Qiniu usage statistics. Today's Storage and Today's Objects are the latest complete safe capacity point summed across the selected storage classes. Month Direct Egress and Month PUT Requests are natural-month-to-date gauges from Qiniu day buckets, not values reconstructed from Prometheus scrape history.",
       "fieldConfig": {
         "defaults": {"custom": {"align": "auto", "cellOptions": {"type": "auto"}}, "noValue": "No buckets discovered"},
         "overrides": [
@@ -484,6 +484,38 @@
               {"id": "custom.cellOptions", "value": {"type": "color-background"}},
               {"id": "custom.width", "value": 140}
             ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Today's Storage"},
+            "properties": [
+              {"id": "unit", "value": "bytes"},
+              {"id": "decimals", "value": 2},
+              {"id": "custom.width", "value": 150}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Today's Objects"},
+            "properties": [
+              {"id": "unit", "value": "short"},
+              {"id": "decimals", "value": 0},
+              {"id": "custom.width", "value": 140}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Month Direct Egress"},
+            "properties": [
+              {"id": "unit", "value": "bytes"},
+              {"id": "decimals", "value": 2},
+              {"id": "custom.width", "value": 170}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Month PUT Requests"},
+            "properties": [
+              {"id": "unit", "value": "short"},
+              {"id": "decimals", "value": 0},
+              {"id": "custom.width", "value": 170}
+            ]
           }
         ]
       },
@@ -500,15 +532,59 @@
           "legendFormat": "{{bucket}}",
           "range": false,
           "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "editorMode": "code",
+          "expr": "sum by (qiniu_account, bucket, region) (max by (qiniu_account, bucket, region, storage_class) (qiniu_kodo_storage_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${kodo_region:regex}\",storage_class=~\"${storage_class:regex}\"}))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "Today's Storage",
+          "range": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "editorMode": "code",
+          "expr": "sum by (qiniu_account, bucket, region) (max by (qiniu_account, bucket, region, storage_class) (qiniu_kodo_objects{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${kodo_region:regex}\",storage_class=~\"${storage_class:regex}\"}))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "Today's Objects",
+          "range": false,
+          "refId": "C"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "editorMode": "code",
+          "expr": "max by (qiniu_account, bucket, region) (qiniu_kodo_usage_egress_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${kodo_region:regex}\",route=\"direct\",period=\"current_month\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "Month Direct Egress",
+          "range": false,
+          "refId": "D"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "editorMode": "code",
+          "expr": "max by (qiniu_account, bucket, region) (qiniu_kodo_usage_requests{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",bucket=~\"${bucket:regex}\",region=~\"${kodo_region:regex}\",operation=\"put\",period=\"current_month\"})",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "Month PUT Requests",
+          "range": false,
+          "refId": "E"
         }
       ],
       "transformations": [
         {
+          "id": "merge",
+          "options": {}
+        },
+        {
           "id": "organize",
           "options": {
-            "excludeByName": {"Time": true, "Value": true, "__name__": true, "container": true, "endpoint": true, "instance": true, "job": true, "namespace": true, "pod": true, "qiniu_account": true, "service": true},
-            "indexByName": {"access": 3, "bucket": 0, "region": 2, "storage_region": 1},
-            "renameByName": {"access": "Access Control", "bucket": "Bucket", "region": "Region ID", "storage_region": "Storage Region"}
+            "excludeByName": {"Time": true, "Value #A": true, "__name__": true, "container": true, "endpoint": true, "instance": true, "job": true, "namespace": true, "pod": true, "qiniu_account": true, "service": true},
+            "indexByName": {"Value #B": 4, "Value #C": 5, "Value #D": 6, "Value #E": 7, "access": 3, "bucket": 0, "region": 2, "storage_region": 1},
+            "renameByName": {"Value #B": "Today's Storage", "Value #C": "Today's Objects", "Value #D": "Month Direct Egress", "Value #E": "Month PUT Requests", "access": "Access Control", "bucket": "Bucket", "region": "Region ID", "storage_region": "Storage Region"}
           }
         }
       ],
@@ -1515,6 +1591,6 @@
   "timezone": "browser",
   "title": "Qiniu Exporter Overview",
   "uid": "qiniu-exporter-overview",
-  "version": 7,
+  "version": 8,
   "weekStart": ""
 }

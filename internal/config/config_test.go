@@ -159,6 +159,21 @@ func TestKodoAdmissionUsesDiscoveredResourcesAndConfiguredIntervals(t *testing.T
 	}
 }
 
+func TestKodoAdmissionAccountsForMonthToDateUsageCalls(t *testing.T) {
+	cfg := defaults()
+	cfg.Kodo.Enabled = true
+	cfg.Kodo.StatisticsTimezoneVerified = true
+	cfg.Kodo.StorageClasses = []string{"standard", "ia", "archive", "deep_archive", "archive_ir", "intelligent_tiering"}
+
+	if err := cfg.ValidateKodoResourceCount(83); err == nil || !strings.Contains(err.Error(), "call budget") {
+		t.Fatalf("expected six-class 30m collection to exceed the 1 QPS safety budget, got %v", err)
+	}
+	cfg.Collection.Intervals.KodoCapacity = Duration(time.Hour)
+	if err := cfg.ValidateKodoResourceCount(83); err != nil {
+		t.Fatalf("60m capacity and 30m activity should admit 83 buckets: %v", err)
+	}
+}
+
 func TestKodoAdmissionStillAccountsForDiscoveryWhenStatisticsAreUnverified(t *testing.T) {
 	cfg := defaults()
 	cfg.Kodo.Enabled = true

@@ -34,6 +34,12 @@ are separate columns, unknown future Region IDs remain visible, and Access
 Control is rendered as a colored Public/Private cell. CDN operating states use
 semantic color blocks in both the summary and inventory table.
 
+Bucket Inventory joins four usage columns to the metadata row: the latest
+complete storage capacity and object count summed across the selected storage
+classes, plus natural-month-to-date direct egress and PUT requests. The month
+columns are exporter snapshots from Qiniu day buckets; they are not calculated
+from repeated Prometheus scrapes of the latest five-minute rate.
+
 CDN usage cards are upstream period snapshots, not Prometheus estimates. The
 dashboard shows last-complete-hour and today traffic/peak bandwidth,
 current-month traffic and peak bandwidth, observed active domains, and

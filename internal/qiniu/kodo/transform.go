@@ -88,3 +88,27 @@ func rateSampleFromPoint(kind GaugeKind, query Query, point Point) GaugeSample {
 	sample.Value /= BucketWidth.Seconds()
 	return sample
 }
+
+func sumMonthToDateDailyUsage(points []Point, query MonthToDateQuery) (float64, error) {
+	var total float64
+	for i, point := range points {
+		localTime := point.Time.In(query.Begin.Location())
+		if localTime.Hour() != 0 || localTime.Minute() != 0 || localTime.Second() != 0 || localTime.Nanosecond() != 0 {
+			return 0, fmt.Errorf("%w: point %d is not aligned to the reporting day", ErrUnexpectedResponse, i)
+		}
+		if point.Time.Before(query.Begin) || !point.Time.Before(query.End) {
+			return 0, fmt.Errorf("%w: point %d is outside the query window", ErrUnexpectedResponse, i)
+		}
+		if math.IsNaN(point.Value) || math.IsInf(point.Value, 0) || point.Value < 0 {
+			return 0, fmt.Errorf("%w: point %d has invalid value", ErrUnexpectedResponse, i)
+		}
+		if i > 0 && !point.Time.After(points[i-1].Time) {
+			return 0, fmt.Errorf("%w: timestamps are not strictly increasing", ErrNonContinuous)
+		}
+		total += point.Value
+		if math.IsInf(total, 0) {
+			return 0, fmt.Errorf("%w: usage sum is not finite", ErrUnexpectedResponse)
+		}
+	}
+	return total, nil
+}

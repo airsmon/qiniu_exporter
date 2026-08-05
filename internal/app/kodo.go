@@ -42,6 +42,7 @@ func RegisterKodo(
 	if !cfg.Kodo.StatisticsTimezoneVerified {
 		metrics.ObserveSkipped("kodo/capacity", "timezone_unverified")
 		metrics.ObserveSkipped("kodo/activity", "timezone_unverified")
+		metrics.ObserveSkipped("kodo/summary", "timezone_unverified")
 	}
 	location, err := time.LoadLocation("Asia/Shanghai")
 	if err != nil {
@@ -65,9 +66,9 @@ func RegisterKodo(
 		for index, bucket := range buckets {
 			resources[index] = resourceKey(bucket)
 		}
-		retained := make([]string, 0, 2*len(resources))
+		retained := make([]string, 0, 3*len(resources))
 		for _, resource := range resources {
-			retained = append(retained, "capacity/"+resource, "activity/"+resource)
+			retained = append(retained, "capacity/"+resource, "activity/"+resource, "summary/"+resource)
 		}
 		store.Retain(retained)
 		inventory.Publish(buckets, snapshot.Meta{
@@ -76,6 +77,7 @@ func RegisterKodo(
 		if cfg.Kodo.StatisticsTimezoneVerified {
 			metrics.ReplaceResources("kodo", "capacity", resources, cfg.Collection.StaleAfter.Realtime.Value())
 			metrics.ReplaceResources("kodo", "activity", resources, cfg.Collection.StaleAfter.Realtime.Value())
+			metrics.ReplaceResources("kodo", "summary", resources, cfg.Collection.StaleAfter.Realtime.Value())
 		}
 		catalog.Replace(buckets)
 		return nil
@@ -131,6 +133,31 @@ func RegisterKodo(
 				resource := resourceKey(bucket)
 				resources[index] = resource
 				if err := collectKodoActivity(ctx, client, bucket, cfg.Collection.SourceLag.Value(), cfg.Collection.StaleAfter.Realtime.Value(), location, store, metrics, resource); err != nil {
+					failed[resource] = err
+				}
+			}
+			if len(failed) > 0 {
+				return resources, failed
+			}
+			return resources, nil
+		},
+	}); err != nil {
+		return err
+	}
+	if err := scheduler.Add(poller.Job{
+		Name: "kodo/summary", PhaseKey: "kodo/summary", Interval: cfg.Collection.Intervals.KodoActivity.Value(),
+		Timeout: collectionTimeout(cfg.Collection.Intervals.KodoActivity.Value()),
+		RunResources: func(ctx context.Context) ([]string, error) {
+			buckets := catalog.Snapshot()
+			if len(buckets) == 0 {
+				return nil, poller.Skip("no_resources")
+			}
+			resources := make([]string, len(buckets))
+			failed := make(kodoPartialErrors)
+			for index, bucket := range buckets {
+				resource := resourceKey(bucket)
+				resources[index] = resource
+				if err := collectKodoSummary(ctx, client, bucket, cfg.Collection.SourceLag.Value(), cfg.Collection.StaleAfter.Realtime.Value(), location, store, metrics, resource); err != nil {
 					failed[resource] = err
 				}
 			}
@@ -213,6 +240,44 @@ func collectKodoActivity(
 	return nil
 }
 
+func collectKodoSummary(
+	ctx context.Context,
+	client *kodo.Client,
+	bucket kodo.Bucket,
+	sourceLag, staleAfter time.Duration,
+	location *time.Location,
+	store *snapshot.ResourceStore[[]kodo.GaugeSample],
+	metrics *telemetry.Metrics,
+	resource string,
+) error {
+	query, ok := kodoMonthToDateQuery(time.Now(), sourceLag, bucket, location)
+	if !ok {
+		dataAt, err := publishKodoSummarySnapshot(store, "summary/"+resource, []kodo.GaugeSample{
+			{Kind: kodo.GaugeUsageEgressBytes, Bucket: bucket.Name, Region: bucket.Region, Route: kodo.RouteDirect, Period: kodo.PeriodCurrentMonth, DataAt: query.Begin},
+			{Kind: kodo.GaugeUsageRequests, Bucket: bucket.Name, Region: bucket.Region, Operation: kodo.OperationPut, Period: kodo.PeriodCurrentMonth, DataAt: query.Begin},
+		}, staleAfter)
+		if err != nil {
+			return fmt.Errorf("bucket %s empty current-month summary: %w", bucket.Name, err)
+		}
+		metrics.SetResourceDataTimestamp("kodo", "summary", resource, dataAt)
+		return nil
+	}
+	egress, err := client.CurrentMonthDirectEgress(ctx, query)
+	if err != nil {
+		return fmt.Errorf("bucket %s current-month direct egress: %w", bucket.Name, err)
+	}
+	put, err := client.CurrentMonthPUTRequests(ctx, query)
+	if err != nil {
+		return fmt.Errorf("bucket %s current-month PUT requests: %w", bucket.Name, err)
+	}
+	dataAt, err := publishKodoSummarySnapshot(store, "summary/"+resource, []kodo.GaugeSample{egress, put}, staleAfter)
+	if err != nil {
+		return fmt.Errorf("bucket %s current-month summary: %w", bucket.Name, err)
+	}
+	metrics.SetResourceDataTimestamp("kodo", "summary", resource, dataAt)
+	return nil
+}
+
 func kodoQuery(now time.Time, sourceLag time.Duration, bucket kodo.Bucket, location *time.Location) kodo.Query {
 	end := now.In(location).Add(-sourceLag).Truncate(kodo.BucketWidth)
 	return kodo.Query{
@@ -222,6 +287,21 @@ func kodoQuery(now time.Time, sourceLag time.Duration, bucket kodo.Bucket, locat
 		End:        end,
 		SafeBefore: end,
 	}
+}
+
+func kodoMonthToDateQuery(now time.Time, sourceLag time.Duration, bucket kodo.Bucket, location *time.Location) (kodo.MonthToDateQuery, bool) {
+	localNow := now.In(location)
+	begin := time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, location)
+	end := localNow.Add(-sourceLag).Truncate(kodo.BucketWidth)
+	if !begin.Before(end) {
+		return kodo.MonthToDateQuery{Bucket: bucket.Name, Region: bucket.Region, Begin: begin, End: begin}, false
+	}
+	return kodo.MonthToDateQuery{
+		Bucket: bucket.Name,
+		Region: bucket.Region,
+		Begin:  begin,
+		End:    end,
+	}, true
 }
 
 func publishKodoSnapshot(
@@ -244,4 +324,28 @@ func publishKodoSnapshot(
 		CollectedAt: time.Now(), DataAt: bucketEnd, StaleAfter: staleAfter,
 	})
 	return bucketEnd, nil
+}
+
+func publishKodoSummarySnapshot(
+	store *snapshot.ResourceStore[[]kodo.GaugeSample],
+	resource string,
+	samples []kodo.GaugeSample,
+	staleAfter time.Duration,
+) (time.Time, error) {
+	if len(samples) == 0 {
+		return time.Time{}, fmt.Errorf("kodo summary snapshot has no samples")
+	}
+	dataAt := samples[0].DataAt
+	if dataAt.IsZero() {
+		return time.Time{}, fmt.Errorf("kodo summary snapshot has no data timestamp")
+	}
+	for index := 1; index < len(samples); index++ {
+		if !samples[index].DataAt.Equal(dataAt) {
+			return time.Time{}, fmt.Errorf("kodo summary snapshot data timestamp mismatch at sample %d", index)
+		}
+	}
+	store.Publish(resource, samples, snapshot.Meta{
+		CollectedAt: time.Now(), DataAt: dataAt, StaleAfter: staleAfter,
+	})
+	return dataAt, nil
 }

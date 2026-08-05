@@ -84,7 +84,11 @@ const (
 	GaugeObjects              GaugeKind = "objects"
 	GaugeRequestsPerSecond    GaugeKind = "requests_per_second"
 	GaugeEgressBytesPerSecond GaugeKind = "egress_bytes_per_second"
+	GaugeUsageEgressBytes     GaugeKind = "usage_egress_bytes"
+	GaugeUsageRequests        GaugeKind = "usage_requests"
 )
+
+const PeriodCurrentMonth = "current_month"
 
 type Operation string
 
@@ -109,6 +113,7 @@ type GaugeSample struct {
 	StorageClass StorageClass
 	Operation    Operation
 	Route        Route
+	Period       string
 	Value        float64
 	DataAt       time.Time
 }
@@ -122,6 +127,16 @@ type Query struct {
 	Begin      time.Time
 	End        time.Time
 	SafeBefore time.Time
+}
+
+// MonthToDateQuery identifies a bucket and a safe, five-minute-aligned end
+// within the current reporting month. Begin is the inclusive local month
+// boundary and End is exclusive in the Qiniu API.
+type MonthToDateQuery struct {
+	Bucket string
+	Region string
+	Begin  time.Time
+	End    time.Time
 }
 
 type CollectInput struct {

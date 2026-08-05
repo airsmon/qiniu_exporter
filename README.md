@@ -64,6 +64,7 @@ classes and billing resource-pack tuples remain explicitly configured.
 | Kodo inventory | `qiniu_kodo_buckets`, `qiniu_kodo_bucket_info` | `bucket`, `region`, `storage_region`, `access` on the info metric | Read-only discovery runs independently of the Kodo statistics gate. `region` is the native Region ID; `access` is `public` or `private`. |
 | Kodo storage | `qiniu_kodo_storage_bytes`, `qiniu_kodo_objects` | `bucket`, `region`, `storage_class` | Requires the Kodo timezone gate. |
 | Kodo activity | `qiniu_kodo_requests_per_second`, `qiniu_kodo_egress_bytes_per_second` | `bucket`, `region`, plus `operation` or `route` | Latest complete five-minute bucket; requires the Kodo timezone gate. |
+| Kodo period usage | `qiniu_kodo_usage_egress_bytes`, `qiniu_kodo_usage_requests` | `bucket`, `region`, `period`, plus `route` or `operation` | Natural-month-to-date gauges assembled from Qiniu day buckets; requires the Kodo timezone gate. |
 | CDN inventory | `qiniu_cdn_domains`, `qiniu_cdn_domain_info` | `domain`, `operating_state`, `product` on the info metric | Read-only discovery runs independently of the CDN statistics gates. `operating_state` describes the latest Qiniu domain-management operation, not availability. |
 | CDN monitoring | `qiniu_cdn_monitoring_bandwidth_bits_per_second`, `qiniu_cdn_monitoring_traffic_bytes_per_second` | `domain`, `region` | Requires the CDN timezone and monitoring-unit gates. |
 | CDN period usage | `qiniu_cdn_usage_traffic_bytes`, `qiniu_cdn_usage_peak_bandwidth_bits_per_second`, `qiniu_cdn_usage_account_traffic_bytes`, `qiniu_cdn_usage_account_peak_bandwidth_bits_per_second`, `qiniu_cdn_usage_active_domains`, `qiniu_cdn_usage_complete` | `period`; domain metrics also use `domain` | Exact `last_complete_hour`, `today`, and `current_month` traffic/peak summaries. Current-month traffic uses completed metering days plus today. Exact monthly peak bandwidth uses five-minute points; completed days are backfilled in three-day windows and cached in memory. Account metrics are omitted when the discovered domain scope is incomplete. |
@@ -82,10 +83,12 @@ including `go_*` and `process_*`.
 
 The bundled Grafana dashboard shows Kodo Storage Region and native Region ID in
 separate columns and renders Bucket access control and CDN operating states as
-semantic color blocks. CDN usage cards show the last complete hour, today, and
-current month without trying to reconstruct totals from sampled Prometheus
-Gauge history. Monthly Top 5 bandwidth follows the same domains selected by
-monthly traffic. Billing snapshot values remain separate KPI cards.
+semantic color blocks. Bucket Inventory also joins the latest storage/object
+gauges and the natural-month direct-egress/PUT gauges for each bucket. CDN
+usage cards show the last complete hour, today, and current month without
+trying to reconstruct totals from sampled Prometheus Gauge history. Monthly
+Top 5 bandwidth follows the same domains selected by monthly traffic. Billing
+snapshot values remain separate KPI cards.
 
 Upstream time-bucket values and billing snapshots are gauges, even when they
 represent requests or traffic. They may be corrected or reset by Qiniu and are

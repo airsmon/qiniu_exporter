@@ -351,7 +351,7 @@ func (c *Config) ValidateKodoResourceCount(resourceCount int) error {
 	required := float64(discoveryPages) / discoveryTimeout(c.Collection.Intervals.Discovery.Value()).Seconds()
 	if c.Kodo.StatisticsTimezoneVerified && resourceCount > 0 {
 		resources, classes := float64(resourceCount), float64(len(c.Kodo.StorageClasses))
-		required += resources * (4.0/collectionTimeout(c.Collection.Intervals.KodoActivity.Value()).Seconds() + 2.0*classes/collectionTimeout(c.Collection.Intervals.KodoCapacity.Value()).Seconds())
+		required += resources * (6.0/collectionTimeout(c.Collection.Intervals.KodoActivity.Value()).Seconds() + 2.0*classes/collectionTimeout(c.Collection.Intervals.KodoCapacity.Value()).Seconds())
 	}
 	if required > c.Collection.KodoMaxQPS*utilization {
 		return fmt.Errorf("kodo call budget %.3f QPS exceeds first-request budget %.3f QPS", required, c.Collection.KodoMaxQPS*utilization)

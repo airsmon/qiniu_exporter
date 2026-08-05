@@ -117,7 +117,7 @@ func TestKodoStartupDiscoveryFailureIsNonfatalAndRetried(t *testing.T) {
 	assertAppGauge(t, registry, "qiniu_exporter_collector_success", map[string]string{
 		"module": "kodo", "collector": "discovery",
 	}, 1)
-	for _, collectorName := range []string{"capacity", "activity"} {
+	for _, collectorName := range []string{"capacity", "activity", "summary"} {
 		for _, resource := range []string{"bucket/z0", "bucket/z1"} {
 			assertAppGauge(t, registry, "qiniu_exporter_resource_collector_success", map[string]string{
 				"module": "kodo", "collector": collectorName, "resource": resource,

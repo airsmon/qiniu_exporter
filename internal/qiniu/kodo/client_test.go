@@ -193,6 +193,211 @@ func TestGETRequestsRejectsMissingBucket(t *testing.T) {
 	}
 }
 
+func TestCurrentMonthUsageUsesDailyBucketsAndSumsSparsePoints(t *testing.T) {
+	t.Parallel()
+
+	query := testMonthToDateQuery()
+	tests := []struct {
+		name       string
+		call       func(*Client) (GaugeSample, error)
+		path       string
+		selectName string
+		metric     string
+		valueName  string
+		wantKind   GaugeKind
+		wantRoute  Route
+		wantOp     Operation
+	}{
+		{
+			name: "direct egress",
+			call: func(client *Client) (GaugeSample, error) {
+				return client.CurrentMonthDirectEgress(context.Background(), query)
+			},
+			path:       BlobIOPath,
+			selectName: "flow",
+			metric:     "flow_out",
+			valueName:  "flow",
+			wantKind:   GaugeUsageEgressBytes,
+			wantRoute:  RouteDirect,
+		},
+		{
+			name: "put requests",
+			call: func(client *Client) (GaugeSample, error) {
+				return client.CurrentMonthPUTRequests(context.Background(), query)
+			},
+			path:       RSPutPath,
+			selectName: "hits",
+			valueName:  "hits",
+			wantKind:   GaugeUsageRequests,
+			wantOp:     OperationPut,
+		},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.Method != http.MethodGet {
+					t.Errorf("method = %q, want GET", request.Method)
+				}
+				if request.URL.Path != test.path {
+					t.Errorf("path = %q, want %q", request.URL.Path, test.path)
+				}
+				params := request.URL.Query()
+				if got := params.Get("begin"); got != "20260801000000" {
+					t.Errorf("begin = %q", got)
+				}
+				if got := params.Get("end"); got != "20260805101500" {
+					t.Errorf("end = %q", got)
+				}
+				if got := params.Get("g"); got != "day" {
+					t.Errorf("g = %q, want day", got)
+				}
+				if got := params.Get("select"); got != test.selectName {
+					t.Errorf("select = %q, want %q", got, test.selectName)
+				}
+				if got := params.Get("$metric"); got != test.metric {
+					t.Errorf("$metric = %q, want %q", got, test.metric)
+				}
+				if params.Get("$bucket") != query.Bucket || params.Get("$region") != query.Region {
+					t.Errorf("filters = %q/%q", params.Get("$bucket"), params.Get("$region"))
+				}
+				if params.Has("bucket") || params.Has("region") {
+					t.Errorf("request unexpectedly used non-dollar filters")
+				}
+				response.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(response, `[
+  {"time":"2026-08-01T00:00:00+08:00","values":{"%s":10}},
+  {"time":"2026-08-03T00:00:00+08:00","values":{"%s":20}},
+  {"time":"2026-08-05T00:00:00+08:00","values":{"%s":30}}
+]`, test.valueName, test.valueName, test.valueName)
+			})
+
+			got, err := test.call(newTestClient(t, handler))
+			if err != nil {
+				t.Fatalf("current-month call error = %v", err)
+			}
+			want := GaugeSample{
+				Kind:      test.wantKind,
+				Bucket:    query.Bucket,
+				Region:    query.Region,
+				Operation: test.wantOp,
+				Route:     test.wantRoute,
+				Period:    PeriodCurrentMonth,
+				Value:     60,
+				DataAt:    query.End,
+			}
+			if got != want {
+				t.Fatalf("current-month sample = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestCurrentMonthUsageTreatsEmptyArrayAsZero(t *testing.T) {
+	t.Parallel()
+
+	query := testMonthToDateQuery()
+	handler := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte("[]"))
+	})
+	client := newTestClient(t, handler)
+
+	got, err := client.CurrentMonthDirectEgress(context.Background(), query)
+	if err != nil {
+		t.Fatalf("CurrentMonthDirectEgress() error = %v", err)
+	}
+	if got.Value != 0 || got.Period != PeriodCurrentMonth || !got.DataAt.Equal(query.End) {
+		t.Fatalf("CurrentMonthDirectEgress() = %+v", got)
+	}
+}
+
+func TestCurrentMonthUsageRejectsInvalidQueriesBeforeRequest(t *testing.T) {
+	t.Parallel()
+
+	location := time.FixedZone("UTC+8", 8*60*60)
+	valid := testMonthToDateQuery()
+	tests := []struct {
+		name   string
+		mutate func(*MonthToDateQuery)
+	}{
+		{"missing bucket", func(query *MonthToDateQuery) { query.Bucket = "" }},
+		{"bucket whitespace", func(query *MonthToDateQuery) { query.Bucket = " bucket" }},
+		{"missing region", func(query *MonthToDateQuery) { query.Region = "" }},
+		{"zero begin", func(query *MonthToDateQuery) { query.Begin = time.Time{} }},
+		{"zero end", func(query *MonthToDateQuery) { query.End = time.Time{} }},
+		{"begin after first day", func(query *MonthToDateQuery) { query.Begin = query.Begin.Add(24 * time.Hour) }},
+		{"begin after end", func(query *MonthToDateQuery) { query.End = query.Begin.Add(-BucketWidth) }},
+		{"end in next month", func(query *MonthToDateQuery) { query.End = time.Date(2026, 9, 1, 0, 0, 0, 0, location) }},
+		{"unaligned end", func(query *MonthToDateQuery) { query.End = query.End.Add(time.Minute) }},
+		{"different timezone", func(query *MonthToDateQuery) { query.End = query.End.In(time.UTC) }},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			called := false
+			client := newTestClient(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				called = true
+			}))
+			query := valid
+			test.mutate(&query)
+			_, err := client.CurrentMonthDirectEgress(context.Background(), query)
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("CurrentMonthDirectEgress() error = %v, want ErrInvalidInput", err)
+			}
+			if called {
+				t.Fatal("invalid query made an HTTP request")
+			}
+		})
+	}
+}
+
+func TestCurrentMonthUsageRejectsUnsafeDailyResponsesWithoutLeakingValues(t *testing.T) {
+	t.Parallel()
+
+	query := testMonthToDateQuery()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"null response", "null"},
+		{"before begin", `[{"time":"2026-07-31T00:00:00+08:00","values":{"flow":1}}]`},
+		{"at end", `[{"time":"2026-08-05T10:15:00+08:00","values":{"flow":1}}]`},
+		{"not day aligned", `[{"time":"2026-08-02T00:05:00+08:00","values":{"flow":1}}]`},
+		{"duplicate day", `[{"time":"2026-08-02T00:00:00+08:00","values":{"flow":1}},{"time":"2026-08-02T00:00:00+08:00","values":{"flow":2}}]`},
+		{"out of order", `[{"time":"2026-08-03T00:00:00+08:00","values":{"flow":1}},{"time":"2026-08-02T00:00:00+08:00","values":{"flow":2}}]`},
+		{"negative value", `[{"time":"2026-08-02T00:00:00+08:00","values":{"flow":-1}}]`},
+		{"non finite value", `[{"time":"2026-08-02T00:00:00+08:00","values":{"flow":1e999}}]`},
+		{"sum overflow", `[{"time":"2026-08-02T00:00:00+08:00","values":{"flow":1e308}},{"time":"2026-08-03T00:00:00+08:00","values":{"flow":1e308}}]`},
+		{"secret timestamp", `[{"time":"credential-shaped-secret","values":{"flow":1}}]`},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := newTestClient(t, http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				response.Header().Set("Content-Type", "application/json")
+				_, _ = response.Write([]byte(test.body))
+			}))
+			_, err := client.CurrentMonthDirectEgress(context.Background(), query)
+			if !errors.Is(err, ErrUnexpectedResponse) && !errors.Is(err, ErrNonContinuous) {
+				t.Fatalf("CurrentMonthDirectEgress() error = %v, want a response validation error", err)
+			}
+			if strings.Contains(err.Error(), "credential-shaped-secret") || strings.Contains(err.Error(), "1e999") {
+				t.Fatalf("error exposed response data: %v", err)
+			}
+		})
+	}
+}
+
 func TestResponseErrorsDoNotEchoUntrustedTimestampOrNumber(t *testing.T) {
 	badTimestamp := "tenant-token-instead-of-time"
 	_, err := (valueResponse{{Time: badTimestamp, Values: map[string]json.Number{"hits": "1"}}}).points("hits")
@@ -243,6 +448,16 @@ func testQuery() Query {
 		Begin:      time.Date(2026, 8, 3, 10, 0, 0, 0, location),
 		End:        time.Date(2026, 8, 3, 10, 15, 0, 0, location),
 		SafeBefore: time.Date(2026, 8, 3, 10, 15, 0, 0, location),
+	}
+}
+
+func testMonthToDateQuery() MonthToDateQuery {
+	location := time.FixedZone("UTC+8", 8*60*60)
+	return MonthToDateQuery{
+		Bucket: "static-bucket",
+		Region: "z0",
+		Begin:  time.Date(2026, 8, 1, 0, 0, 0, 0, location),
+		End:    time.Date(2026, 8, 5, 10, 15, 0, 0, location),
 	}
 }
 

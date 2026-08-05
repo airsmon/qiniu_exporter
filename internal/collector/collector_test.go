@@ -22,6 +22,10 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 		{Kind: kodo.GaugeRequestsPerSecond, Bucket: "bucket", Region: "z0", Operation: kodo.OperationGet, Value: 3},
 		{Kind: kodo.GaugeEgressBytesPerSecond, Bucket: "bucket", Region: "z0", Route: kodo.RouteDirect, Value: 4},
 	}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
+	kodoStore.Publish("summary/bucket", []kodo.GaugeSample{
+		{Kind: kodo.GaugeUsageEgressBytes, Bucket: "bucket", Region: "z0", Route: kodo.RouteDirect, Period: kodo.PeriodCurrentMonth, Value: 8192, DataAt: now},
+		{Kind: kodo.GaugeUsageRequests, Bucket: "bucket", Region: "z0", Operation: kodo.OperationPut, Period: kodo.PeriodCurrentMonth, Value: 7, DataAt: now},
+	}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
 	kodoInventory := &snapshot.Store[[]kodo.Bucket]{}
 	kodoInventory.Publish([]kodo.Bucket{{
 		Name: "bucket", Region: "z0", StorageRegion: "East China - Zhejiang", Private: true,
@@ -115,6 +119,7 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 	want := []string{
 		"qiniu_kodo_buckets", "qiniu_kodo_bucket_info",
 		"qiniu_kodo_storage_bytes", "qiniu_kodo_objects", "qiniu_kodo_requests_per_second", "qiniu_kodo_egress_bytes_per_second",
+		"qiniu_kodo_usage_egress_bytes", "qiniu_kodo_usage_requests",
 		"qiniu_cdn_domains", "qiniu_cdn_domain_info",
 		"qiniu_cdn_monitoring_bandwidth_bits_per_second", "qiniu_cdn_monitoring_traffic_bytes_per_second", "qiniu_cdn_requests_per_second", "qiniu_cdn_http_responses_per_second",
 		"qiniu_cdn_usage_traffic_bytes", "qiniu_cdn_usage_peak_bandwidth_bits_per_second", "qiniu_cdn_usage_account_traffic_bytes", "qiniu_cdn_usage_account_peak_bandwidth_bits_per_second", "qiniu_cdn_usage_active_domains", "qiniu_cdn_usage_complete",
@@ -145,6 +150,28 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 	}
 	if got := names["qiniu_cdn_domain_info"]; got != 1 {
 		t.Fatalf("CDN domain inventory series = %d, want 1", got)
+	}
+}
+
+func TestKodoCollectorOmitsPriorMonthUsageSnapshot(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	now := time.Now().In(kodoReportingLocation)
+	priorMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, kodoReportingLocation).Add(-time.Minute)
+	store := &snapshot.ResourceStore[[]kodo.GaugeSample]{}
+	store.Publish("summary/bucket", []kodo.GaugeSample{
+		{Kind: kodo.GaugeUsageEgressBytes, Bucket: "bucket", Region: "z0", Route: kodo.RouteDirect, Period: kodo.PeriodCurrentMonth, Value: 8192, DataAt: priorMonth},
+		{Kind: kodo.GaugeUsageRequests, Bucket: "bucket", Region: "z0", Operation: kodo.OperationPut, Period: kodo.PeriodCurrentMonth, Value: 7, DataAt: priorMonth},
+	}, snapshot.Meta{CollectedAt: time.Now(), StaleAfter: 24 * time.Hour})
+	registry.MustRegister(NewKodo(&snapshot.Store[[]kodo.Bucket]{}, store))
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() == "qiniu_kodo_usage_egress_bytes" || family.GetName() == "qiniu_kodo_usage_requests" {
+			t.Fatalf("prior-month snapshot exposed as current usage: %s", family.GetName())
+		}
 	}
 }
 

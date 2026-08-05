@@ -179,6 +179,38 @@ func (c *Client) CDNOriginEgress(ctx context.Context, query Query) (GaugeSample,
 	return sample, nil
 }
 
+func (c *Client) CurrentMonthDirectEgress(ctx context.Context, query MonthToDateQuery) (GaugeSample, error) {
+	value, err := c.fetchMonthToDateUsage(ctx, BlobIOPath, query, "flow", "flow", "flow_out")
+	if err != nil {
+		return GaugeSample{}, err
+	}
+	return GaugeSample{
+		Kind:   GaugeUsageEgressBytes,
+		Bucket: query.Bucket,
+		Region: query.Region,
+		Route:  RouteDirect,
+		Period: PeriodCurrentMonth,
+		Value:  value,
+		DataAt: query.End,
+	}, nil
+}
+
+func (c *Client) CurrentMonthPUTRequests(ctx context.Context, query MonthToDateQuery) (GaugeSample, error) {
+	value, err := c.fetchMonthToDateUsage(ctx, RSPutPath, query, "hits", "hits", "")
+	if err != nil {
+		return GaugeSample{}, err
+	}
+	return GaugeSample{
+		Kind:      GaugeUsageRequests,
+		Bucket:    query.Bucket,
+		Region:    query.Region,
+		Operation: OperationPut,
+		Period:    PeriodCurrentMonth,
+		Value:     value,
+		DataAt:    query.End,
+	}, nil
+}
+
 func (c *Client) fetchArrayPoint(ctx context.Context, path string, query Query) (Point, error) {
 	if err := validateQuery(query); err != nil {
 		return Point{}, err
@@ -226,6 +258,36 @@ func (c *Client) fetchValuePoint(
 		return Point{}, err
 	}
 	return SelectLatestSafeRate5Min(points, query.SafeBefore)
+}
+
+func (c *Client) fetchMonthToDateUsage(
+	ctx context.Context,
+	path string,
+	query MonthToDateQuery,
+	selectValue string,
+	responseValue string,
+	metric string,
+) (float64, error) {
+	if err := validateMonthToDateQuery(query); err != nil {
+		return 0, err
+	}
+	params := monthToDateParams(query)
+	params.Set("$bucket", query.Bucket)
+	params.Set("$region", query.Region)
+	params.Set("select", selectValue)
+	if metric != "" {
+		params.Set("$metric", metric)
+	}
+
+	var response valueResponse
+	if err := c.getJSON(ctx, path, params, &response); err != nil {
+		return 0, err
+	}
+	points, err := response.points(responseValue)
+	if err != nil {
+		return 0, err
+	}
+	return sumMonthToDateDailyUsage(points, query)
 }
 
 func (c *Client) getJSON(ctx context.Context, path string, params url.Values, target any) error {
@@ -283,6 +345,14 @@ func commonParams(query Query) url.Values {
 	}
 }
 
+func monthToDateParams(query MonthToDateQuery) url.Values {
+	return url.Values{
+		"begin": {query.Begin.Format(qiniuTimeLayout)},
+		"end":   {query.End.Format(qiniuTimeLayout)},
+		"g":     {"day"},
+	}
+}
+
 func validateQuery(query Query) error {
 	if query.Bucket == "" || strings.TrimSpace(query.Bucket) != query.Bucket {
 		return fmt.Errorf("%w: bucket is required without surrounding whitespace", ErrInvalidInput)
@@ -304,6 +374,36 @@ func validateQuery(query Query) error {
 	}
 	if query.Begin.UnixNano()%BucketWidth.Nanoseconds() != 0 || query.End.UnixNano()%BucketWidth.Nanoseconds() != 0 {
 		return fmt.Errorf("%w: begin and end must align to five minutes", ErrInvalidInput)
+	}
+	return nil
+}
+
+func validateMonthToDateQuery(query MonthToDateQuery) error {
+	if query.Bucket == "" || strings.TrimSpace(query.Bucket) != query.Bucket {
+		return fmt.Errorf("%w: bucket is required without surrounding whitespace", ErrInvalidInput)
+	}
+	if query.Region == "" || strings.TrimSpace(query.Region) != query.Region {
+		return fmt.Errorf("%w: region is required without surrounding whitespace", ErrInvalidInput)
+	}
+	if query.Begin.IsZero() || query.End.IsZero() {
+		return fmt.Errorf("%w: begin and end times are required", ErrInvalidInput)
+	}
+	if query.Begin.Location().String() != query.End.Location().String() {
+		return fmt.Errorf("%w: begin and end must use the same timezone", ErrInvalidInput)
+	}
+	beginYear, beginMonth, beginDay := query.Begin.Date()
+	if beginDay != 1 || query.Begin.Hour() != 0 || query.Begin.Minute() != 0 || query.Begin.Second() != 0 || query.Begin.Nanosecond() != 0 {
+		return fmt.Errorf("%w: begin must be the first day of the month at midnight", ErrInvalidInput)
+	}
+	if !query.Begin.Before(query.End) {
+		return fmt.Errorf("%w: begin must be before end", ErrInvalidInput)
+	}
+	endYear, endMonth, _ := query.End.Date()
+	if endYear != beginYear || endMonth != beginMonth {
+		return fmt.Errorf("%w: end must be within the begin month", ErrInvalidInput)
+	}
+	if query.End.Minute()%5 != 0 || query.End.Second() != 0 || query.End.Nanosecond() != 0 {
+		return fmt.Errorf("%w: end must align to five minutes", ErrInvalidInput)
 	}
 	return nil
 }

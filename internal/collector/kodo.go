@@ -12,13 +12,17 @@ type KodoCollector struct {
 	inventory *snapshot.Store[[]kodo.Bucket]
 	store     *snapshot.ResourceStore[[]kodo.GaugeSample]
 
-	buckets      *prometheus.Desc
-	bucketInfo   *prometheus.Desc
-	storageBytes *prometheus.Desc
-	objects      *prometheus.Desc
-	requests     *prometheus.Desc
-	egress       *prometheus.Desc
+	buckets       *prometheus.Desc
+	bucketInfo    *prometheus.Desc
+	storageBytes  *prometheus.Desc
+	objects       *prometheus.Desc
+	requests      *prometheus.Desc
+	egress        *prometheus.Desc
+	usageEgress   *prometheus.Desc
+	usageRequests *prometheus.Desc
 }
+
+var kodoReportingLocation = time.FixedZone("Asia/Shanghai", 8*60*60)
 
 func NewKodo(inventory *snapshot.Store[[]kodo.Bucket], store *snapshot.ResourceStore[[]kodo.GaugeSample]) *KodoCollector {
 	return &KodoCollector{
@@ -54,6 +58,16 @@ func NewKodo(inventory *snapshot.Store[[]kodo.Bucket], store *snapshot.ResourceS
 			"Average Kodo egress rate in the latest complete five-minute bucket.",
 			[]string{"bucket", "region", "route"}, nil,
 		),
+		usageEgress: prometheus.NewDesc(
+			"qiniu_kodo_usage_egress_bytes",
+			"Kodo egress bytes accumulated over a bounded usage period.",
+			[]string{"bucket", "region", "route", "period"}, nil,
+		),
+		usageRequests: prometheus.NewDesc(
+			"qiniu_kodo_usage_requests",
+			"Kodo customer requests accumulated over a bounded usage period.",
+			[]string{"bucket", "region", "operation", "period"}, nil,
+		),
 	}
 }
 
@@ -64,6 +78,8 @@ func (c *KodoCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.objects
 	ch <- c.requests
 	ch <- c.egress
+	ch <- c.usageEgress
+	ch <- c.usageRequests
 }
 
 func (c *KodoCollector) Collect(ch chan<- prometheus.Metric) {
@@ -89,7 +105,26 @@ func (c *KodoCollector) Collect(ch chan<- prometheus.Metric) {
 				ch <- prometheus.MustNewConstMetric(c.requests, prometheus.GaugeValue, sample.Value, sample.Bucket, sample.Region, string(sample.Operation))
 			case kodo.GaugeEgressBytesPerSecond:
 				ch <- prometheus.MustNewConstMetric(c.egress, prometheus.GaugeValue, sample.Value, sample.Bucket, sample.Region, string(sample.Route))
+			case kodo.GaugeUsageEgressBytes:
+				if !sameReportingMonth(sample.DataAt, now) {
+					continue
+				}
+				ch <- prometheus.MustNewConstMetric(c.usageEgress, prometheus.GaugeValue, sample.Value, sample.Bucket, sample.Region, string(sample.Route), sample.Period)
+			case kodo.GaugeUsageRequests:
+				if !sameReportingMonth(sample.DataAt, now) {
+					continue
+				}
+				ch <- prometheus.MustNewConstMetric(c.usageRequests, prometheus.GaugeValue, sample.Value, sample.Bucket, sample.Region, string(sample.Operation), sample.Period)
 			}
 		}
 	}
+}
+
+func sameReportingMonth(dataAt, now time.Time) bool {
+	if dataAt.IsZero() {
+		return false
+	}
+	dataYear, dataMonth, _ := dataAt.In(kodoReportingLocation).Date()
+	nowYear, nowMonth, _ := now.In(kodoReportingLocation).Date()
+	return dataYear == nowYear && dataMonth == nowMonth
 }

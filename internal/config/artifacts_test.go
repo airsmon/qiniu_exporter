@@ -70,8 +70,8 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 	if dashboard.Title == "" || len(dashboard.Panels) == 0 {
 		t.Fatal("Grafana dashboard title or panels are empty")
 	}
-	if dashboard.Version < 7 {
-		t.Fatalf("Grafana dashboard version = %d, want at least 7", dashboard.Version)
+	if dashboard.Version < 8 {
+		t.Fatalf("Grafana dashboard version = %d, want at least 8", dashboard.Version)
 	}
 
 	variables := make(map[string]int, len(dashboard.Templating.List))
@@ -220,7 +220,6 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 	}
 	for id, metric := range map[int]string{
 		39: "qiniu_kodo_buckets",
-		40: "qiniu_kodo_bucket_info",
 		41: "qiniu_cdn_domains",
 		42: "qiniu_cdn_domain_info",
 		43: "qiniu_cdn_domain_info",
@@ -231,13 +230,34 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 		}
 	}
 	bucketInventory := panelByID(40)
+	if len(bucketInventory.Targets) != 5 {
+		t.Fatalf("Bucket Inventory targets = %d, want inventory plus four usage columns", len(bucketInventory.Targets))
+	}
+	for _, target := range bucketInventory.Targets {
+		if !target.Instant {
+			t.Fatalf("Bucket Inventory target %s must be instant: %#v", target.RefID, target)
+		}
+	}
 	for _, token := range []string{"storage_region", "access", "max by (qiniu_account, bucket, storage_region, region, access)", "${kodo_region:regex}"} {
 		if !strings.Contains(bucketInventory.Targets[0].Expression, token) {
 			t.Fatalf("Bucket Inventory query is missing %q: %s", token, bucketInventory.Targets[0].Expression)
 		}
 	}
+	for index, tokens := range [][]string{
+		{"qiniu_kodo_storage_bytes", "storage_class", "sum by (qiniu_account, bucket, region)"},
+		{"qiniu_kodo_objects", "storage_class", "sum by (qiniu_account, bucket, region)"},
+		{"qiniu_kodo_usage_egress_bytes", `route="direct"`, `period="current_month"`},
+		{"qiniu_kodo_usage_requests", `operation="put"`, `period="current_month"`},
+	} {
+		expression := bucketInventory.Targets[index+1].Expression
+		for _, token := range tokens {
+			if !strings.Contains(expression, token) {
+				t.Fatalf("Bucket Inventory target %s is missing %q: %s", bucketInventory.Targets[index+1].RefID, token, expression)
+			}
+		}
+	}
 	bucketPresentation := string(bucketInventory.Transformations) + string(bucketInventory.FieldConfig.Overrides)
-	for _, token := range []string{"Bucket", "Storage Region", "Region ID", "Access Control", "public", "Public", "orange", "private", "Private", "green", "color-background"} {
+	for _, token := range []string{"Bucket", "Storage Region", "Region ID", "Access Control", "Today's Storage", "Today's Objects", "Month Direct Egress", "Month PUT Requests", "merge", "bytes", "public", "Public", "orange", "private", "Private", "green", "color-background"} {
 		if !strings.Contains(bucketPresentation, token) {
 			t.Fatalf("Bucket Inventory presentation is missing %q: %s", token, bucketPresentation)
 		}
