@@ -435,6 +435,8 @@ instead of raising protection limits.
 
 ## Dashboards and alerting rules
 
+![qiniu_exporter Grafana dashboard overview](./grafana/qiniu_exporter-dashboard.jpg)
+
 - Import [grafana/qiniu_exporter.json](./grafana/qiniu_exporter.json) for the
   bundled Grafana dashboard.
 - Load [rules/qiniu-exporter.rules.yml](./rules/qiniu-exporter.rules.yml) for
