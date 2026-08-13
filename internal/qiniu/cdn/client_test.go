@@ -110,6 +110,32 @@ func TestClientUsesOnlyFixedP0EndpointsAndBodies(t *testing.T) {
 				return err
 			},
 		},
+		{
+			name: "top IP traffic",
+			path: topTrafficIPPath,
+			wantBody: map[string]any{
+				"domains": []any{"a.example.com", "b.example.com"}, "startDate": "2026-02-10",
+				"endDate": "2026-02-10", "region": "global",
+			},
+			response: `{"code":200,"error":"","data":{"ips":[],"traffic":[]}}`,
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.FetchTopIPTraffic(ctx, topIPTestQuery())
+				return err
+			},
+		},
+		{
+			name: "top IP requests",
+			path: topCountIPPath,
+			wantBody: map[string]any{
+				"domains": []any{"a.example.com", "b.example.com"}, "startDate": "2026-02-10",
+				"endDate": "2026-02-10", "region": "global",
+			},
+			response: `{"code":200,"error":"","data":{"ips":[],"count":[]}}`,
+			call: func(ctx context.Context, client *Client) error {
+				_, err := client.FetchTopIPRequests(ctx, topIPTestQuery())
+				return err
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -356,6 +382,12 @@ func domainTestQuery() DomainQuery {
 
 func regionalTestQuery() RegionalDomainQuery {
 	return RegionalDomainQuery{DomainQuery: domainTestQuery(), Region: RegionGlobal}
+}
+
+func topIPTestQuery() TopIPQuery {
+	return TopIPQuery{
+		Domains: []string{"a.example.com", "b.example.com"}, StartDate: "2026-02-10", EndDate: "2026-02-10", Region: RegionGlobal,
+	}
 }
 
 type doerFunc func(*http.Request) (*http.Response, error)

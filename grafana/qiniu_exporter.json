@@ -806,11 +806,11 @@
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Complete-scope traffic bytes in the last complete Asia/Shanghai clock hour. This all-domain account total intentionally ignores the domain selector and is unavailable when any active domain failed collection.",
-      "fieldConfig": {"defaults": {"color": {"fixedColor": "blue", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "decbytes"}, "overrides": []},
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "blue", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "suffix: GB"}, "overrides": []},
       "gridPos": {"h": 4, "w": 6, "x": 0, "y": 51},
       "id": 47,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_usage_account_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"last_complete_hour\"})", "instant": true, "legendFormat": "Last hour", "range": false, "refId": "A"}],
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_usage_account_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"last_complete_hour\"}) / 1073741824", "instant": true, "legendFormat": "Last hour", "range": false, "refId": "A"}],
       "title": "All-Domain Hour Traffic",
       "type": "stat"
     },
@@ -827,12 +827,12 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "description": "Complete-scope traffic accumulated today through the latest five-minute bucket. This all-domain account total intentionally ignores the domain selector and is unavailable when a validation gate or active-domain collection is incomplete.",
-      "fieldConfig": {"defaults": {"color": {"fixedColor": "blue", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "decbytes"}, "overrides": []},
+      "description": "Complete-scope traffic accumulated today through the latest five-minute bucket. This all-domain account total intentionally ignores the domain selector. Color thresholds: yellow above 350 GiB and red above 750 GiB.",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 350}, {"color": "red", "value": 750}]}, "unit": "suffix: GB"}, "overrides": []},
       "gridPos": {"h": 4, "w": 6, "x": 12, "y": 51},
       "id": 49,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_usage_account_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"today\"})", "instant": true, "legendFormat": "Today", "range": false, "refId": "A"}],
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_usage_account_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"today\"}) / 1073741824", "instant": true, "legendFormat": "Today", "range": false, "refId": "A"}],
       "title": "All-Domain Today Traffic",
       "type": "stat"
     },
@@ -850,11 +850,11 @@
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Complete-scope current-month traffic combines completed billing-grade day buckets with today's complete five-minute monitoring buckets. This all-domain account total intentionally ignores the domain selector.",
-      "fieldConfig": {"defaults": {"color": {"fixedColor": "green", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "decbytes"}, "overrides": []},
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "green", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "suffix: GB"}, "overrides": []},
       "gridPos": {"h": 4, "w": 6, "x": 0, "y": 55},
       "id": 51,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_usage_account_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"current_month\"})", "instant": true, "legendFormat": "Current month", "range": false, "refId": "A"}],
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account) (qiniu_cdn_usage_account_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"current_month\"}) / 1073741824", "instant": true, "legendFormat": "Current month", "range": false, "refId": "A"}],
       "title": "All-Domain Month Traffic",
       "type": "stat"
     },
@@ -893,12 +893,23 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "All-domain traffic for each Asia/Shanghai date in the current month. Completed dates use Qiniu billing-grade day buckets; today includes data through the latest complete five-minute monitoring bucket. Color thresholds: yellow above 350 GiB and red above 750 GiB.",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 350}, {"color": "red", "value": 750}]}, "unit": "suffix: GB"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 59},
+      "id": 61,
+      "options": {"displayMode": "gradient", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showUnfilled": false},
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "max by (qiniu_account, date) (qiniu_cdn_usage_account_daily_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}) / 1073741824", "instant": true, "legendFormat": "{{date}}", "range": false, "refId": "A"}],
+      "title": "Current Month Daily All-Domain Traffic",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "fieldConfig": {
         "defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true}, "min": 0, "unit": "bps"},
         "overrides": []
       },
       "description": "Latest complete five-minute bandwidth, summed across the selected domain scope and split by Qiniu region. Select one domain for its own series. No data is expected while CDN timezone or monitoring-unit validation is gated.",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 59},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 67},
       "id": 21,
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
@@ -921,7 +932,7 @@
         "overrides": []
       },
       "description": "Latest complete five-minute traffic rate, summed across the selected domain scope and split by Qiniu region. Select one domain for its own series. No data is expected while CDN timezone or monitoring-unit validation is gated.",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 59},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 67},
       "id": 22,
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
@@ -940,11 +951,11 @@
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "The five selected domains with the most current-month traffic. Values combine completed metering days with today's complete monitoring buckets; inactive domains remain zero.",
-      "fieldConfig": {"defaults": {"color": {"fixedColor": "blue", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "decbytes"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 67},
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "blue", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "suffix: GB"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 75},
       "id": 53,
       "options": {"displayMode": "gradient", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showUnfilled": false},
-      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "topk(5, max by (qiniu_account, domain) (qiniu_cdn_usage_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",period=\"current_month\"})) and on (qiniu_account) (max by (qiniu_account) (qiniu_cdn_usage_complete{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"current_month\"}) == 1)", "instant": true, "legendFormat": "{{domain}}", "range": false, "refId": "A"}],
+      "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "(topk(5, max by (qiniu_account, domain) (qiniu_cdn_usage_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",period=\"current_month\"})) and on (qiniu_account) (max by (qiniu_account) (qiniu_cdn_usage_complete{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"current_month\"}) == 1)) / 1073741824", "instant": true, "legendFormat": "{{domain}}", "range": false, "refId": "A"}],
       "title": "Current Month Traffic · Top 5 Domains",
       "type": "bargauge"
     },
@@ -952,7 +963,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Exact current-month five-minute peak bandwidth for the same five domains selected by current-month traffic. Completed billing-grade days are cached and merged with today's complete monitoring points.",
       "fieldConfig": {"defaults": {"color": {"fixedColor": "purple", "mode": "fixed"}, "decimals": 2, "min": 0, "noValue": "Unavailable", "unit": "bps"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 67},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 75},
       "id": 54,
       "options": {"displayMode": "gradient", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showUnfilled": false},
       "targets": [{"datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"}, "editorMode": "code", "expr": "(max by (qiniu_account, domain) (qiniu_cdn_usage_peak_bandwidth_bits_per_second{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",period=\"current_month\"}) and on (qiniu_account, domain) topk(5, max by (qiniu_account, domain) (qiniu_cdn_usage_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",domain=~\"${domain:regex}\",period=\"current_month\"}))) and on (qiniu_account) (max by (qiniu_account) (qiniu_cdn_usage_complete{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"current_month\"}) == 1)", "instant": true, "legendFormat": "{{domain}}", "range": false, "refId": "A"}],
@@ -966,7 +977,7 @@
         "overrides": []
       },
       "description": "No data is expected while the CDN timezone validation gate is active. Confirm the gate state above before treating an empty panel as a collection failure.",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 75},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 83},
       "id": 23,
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
@@ -989,7 +1000,7 @@
         "overrides": []
       },
       "description": "No data is expected while the CDN timezone validation gate is active. Confirm the gate state above before treating an empty panel as a collection failure.",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 75},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 83},
       "id": 24,
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
@@ -1012,7 +1023,7 @@
         "overrides": []
       },
       "description": "No data is expected while the CDN timezone validation gate is active. Confirm the gate state above before treating an empty panel as a collection failure.",
-      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 83},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 91},
       "id": 25,
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
@@ -1035,7 +1046,7 @@
         "overrides": []
       },
       "description": "No data is expected while the CDN timezone validation gate is active. Confirm the gate state above before treating an empty panel as a collection failure.",
-      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 83},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 91},
       "id": 26,
       "options": {"legend": {"calcs": ["lastNotNull", "min"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "asc"}},
       "targets": [
@@ -1058,7 +1069,7 @@
         "overrides": []
       },
       "description": "No data is expected while the CDN timezone validation gate is active. Confirm the gate state above before treating an empty panel as a collection failure.",
-      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 83},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 91},
       "id": 27,
       "options": {"legend": {"calcs": ["lastNotNull", "min"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "asc"}},
       "targets": [
@@ -1084,7 +1095,7 @@
         ]
       },
       "description": "No data is expected while the CDN timezone validation gate is active. Confirm the gate state above before treating an empty panel as a collection failure.",
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 91},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 99},
       "id": 28,
       "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [
@@ -1109,8 +1120,60 @@
       "type": "timeseries"
     },
     {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Current-day client IP Top 10 across every active domain in the selected account. Qiniu returns only Top 100 per domain batch, so values merged across accounts with more than 100 domains are approximate. The domain selector is intentionally ignored.",
+      "fieldConfig": {
+        "defaults": {"decimals": 4, "unit": "suffix: GB"},
+        "overrides": [{"matcher": {"id": "byName", "options": "Rank"}, "properties": [{"id": "unit", "value": "none"}, {"id": "decimals", "value": 0}]}]
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 107},
+      "id": 57,
+      "options": {"cellHeight": "sm", "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false}, "showHeader": true},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "editorMode": "code",
+          "expr": "sort_desc(max by (qiniu_account, ip, rank) (qiniu_cdn_top_client_ip_traffic_bytes{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"today\"})) / 1073741824",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{rank}} · {{ip}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "qiniu_account": true}, "indexByName": {"rank": 0, "ip": 1, "Value": 2}, "renameByName": {"rank": "Rank", "ip": "IP", "Value": "Traffic (GB)"}}}],
+      "title": "Today Client IP Top 10 · Traffic",
+      "type": "table"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Current-day client IP Top 10 by requests across every active domain in the selected account. Qiniu returns only Top 100 per domain batch, so values merged across accounts with more than 100 domains are approximate. The domain selector is intentionally ignored.",
+      "fieldConfig": {
+        "defaults": {"decimals": 0, "unit": "short"},
+        "overrides": [{"matcher": {"id": "byName", "options": "Rank"}, "properties": [{"id": "unit", "value": "none"}]}]
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 107},
+      "id": 58,
+      "options": {"cellHeight": "sm", "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false}, "showHeader": true},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "editorMode": "code",
+          "expr": "sort_desc(max by (qiniu_account, ip, rank) (qiniu_cdn_top_client_ip_requests{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",period=\"today\"}))",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "{{rank}} · {{ip}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "qiniu_account": true}, "indexByName": {"rank": 0, "ip": 1, "Value": 2}, "renameByName": {"rank": "Rank", "ip": "IP", "Value": "Requests"}}}],
+      "title": "Today Client IP Top 10 · Requests",
+      "type": "table"
+    },
+    {
       "collapsed": false,
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 99},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 115},
       "id": 30,
       "panels": [],
       "title": "Billing · Balance, Costs, and Resource Packs",
@@ -1120,7 +1183,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Latest available account balance returned by Qiniu. Unavailable remains distinct from zero; no account-specific low-balance threshold is assumed.",
       "fieldConfig": {"defaults": {"color": {"fixedColor": "blue", "mode": "fixed"}, "decimals": 2, "noValue": "Unavailable", "unit": "short"}, "overrides": []},
-      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 100},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 116},
       "id": 31,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
       "targets": [
@@ -1150,7 +1213,7 @@
         },
         "overrides": []
       },
-      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 100},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 116},
       "id": 44,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
       "targets": [
@@ -1171,7 +1234,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "Estimated cost for Qiniu's current billing period. This is not a finalized invoice and may change during the period.",
       "fieldConfig": {"defaults": {"color": {"fixedColor": "semi-dark-blue", "mode": "fixed"}, "decimals": 2, "noValue": "Unavailable", "unit": "short"}, "overrides": []},
-      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 100},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 116},
       "id": 45,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
       "targets": [
@@ -1190,9 +1253,9 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "description": "Most recently available finalized monthly cost returned by Qiniu. Use the monthly panel below for the current-year history.",
+      "description": "Most recently available finalized monthly cost returned by Qiniu. Use the monthly panel below for the rolling 12-month history.",
       "fieldConfig": {"defaults": {"color": {"fixedColor": "purple", "mode": "fixed"}, "decimals": 2, "noValue": "Unavailable", "unit": "short"}, "overrides": []},
-      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 100},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 116},
       "id": 46,
       "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
       "targets": [
@@ -1211,16 +1274,16 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "description": "Finalized monthly costs for the current Asia/Shanghai calendar year. Months are fixed labels 01 through 12; the current, not-yet-finalized month is absent.",
+      "description": "The latest twelve finalized Asia/Shanghai billing months, including the previous calendar year when applicable. Month labels use YYYY-MM.",
       "fieldConfig": {
         "defaults": {"color": {"fixedColor": "blue", "mode": "fixed"}, "decimals": 2, "min": 0, "unit": "short"},
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 105},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 121},
       "id": 37,
       "options": {
         "displayMode": "gradient",
-        "orientation": "horizontal",
+        "orientation": "vertical",
         "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
         "showUnfilled": false
       },
@@ -1228,68 +1291,51 @@
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "editorMode": "code",
-          "expr": "max by (qiniu_account, currency, month) (qiniu_billing_current_year_monthly_finalized_cost{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",currency=~\"${currency:regex}\"})",
+          "expr": "max by (qiniu_account, currency, month) (qiniu_billing_last_12_months_finalized_cost{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",currency=~\"${currency:regex}\"})",
           "instant": true,
           "legendFormat": "{{month}} · {{currency}}",
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "Current-Year Monthly Finalized Cost",
+      "title": "Last 12 Months Finalized Cost",
       "type": "bargauge"
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "description": "Summary of finalized months in the current Asia/Shanghai calendar year. The current-period estimate is intentionally excluded.",
+      "description": "Estimated values are next-day increments derived from adjacent cumulative snapshots. Finalized values come only from one-day items in the v2 finalized bill; monthly-billed items are not artificially distributed across days.",
       "fieldConfig": {
         "defaults": {"color": {"mode": "palette-classic"}, "decimals": 2, "noValue": "Unavailable", "unit": "short"},
         "overrides": [
           {"matcher": {"id": "byFrameRefID", "options": "A"}, "properties": [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}}]},
-          {"matcher": {"id": "byFrameRefID", "options": "B"}, "properties": [{"id": "color", "value": {"fixedColor": "purple", "mode": "fixed"}}]},
-          {
-            "matcher": {"id": "byFrameRefID", "options": "C"},
-            "properties": [
-              {"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}},
-              {"id": "decimals", "value": 0},
-              {"id": "unit", "value": "none"}
-            ]
-          }
+          {"matcher": {"id": "byFrameRefID", "options": "B"}, "properties": [{"id": "color", "value": {"fixedColor": "purple", "mode": "fixed"}}]}
         ]
       },
-      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 113},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 129},
       "id": 38,
-      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
+      "options": {"displayMode": "gradient", "orientation": "vertical", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showUnfilled": false},
       "targets": [
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "editorMode": "code",
-          "expr": "sum by (qiniu_account, currency) (max by (qiniu_account, currency, month) (qiniu_billing_current_year_monthly_finalized_cost{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",currency=~\"${currency:regex}\"}))",
+          "expr": "max by (qiniu_account, currency, date) (max_over_time(qiniu_billing_estimated_daily_cost{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",currency=~\"${currency:regex}\"}[31d]))",
           "instant": true,
-          "legendFormat": "YTD finalized · {{currency}}",
+          "legendFormat": "estimated · {{date}} · {{currency}}",
           "range": false,
           "refId": "A"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
           "editorMode": "code",
-          "expr": "avg by (qiniu_account, currency) (max by (qiniu_account, currency, month) (qiniu_billing_current_year_monthly_finalized_cost{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",currency=~\"${currency:regex}\"}))",
+          "expr": "max by (qiniu_account, currency, date) (qiniu_billing_finalized_daily_cost{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",currency=~\"${currency:regex}\"})",
           "instant": true,
-          "legendFormat": "monthly average · {{currency}}",
+          "legendFormat": "finalized · {{date}} · {{currency}}",
           "range": false,
           "refId": "B"
-        },
-        {
-          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "editorMode": "code",
-          "expr": "count by (qiniu_account, currency) (max by (qiniu_account, currency, month) (qiniu_billing_current_year_monthly_finalized_cost{qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\",currency=~\"${currency:regex}\"}))",
-          "instant": true,
-          "legendFormat": "finalized months · {{currency}}",
-          "range": false,
-          "refId": "C"
         }
       ],
-      "title": "Current-Year Billing Summary",
-      "type": "stat"
+      "title": "Daily Costs · Estimated and Finalized",
+      "type": "bargauge"
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
@@ -1298,7 +1344,7 @@
         "defaults": {"color": {"mode": "thresholds"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true}, "max": 1, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.1}, {"color": "green", "value": 0.25}]}, "unit": "percentunit"},
         "overrides": []
       },
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 118},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 137},
       "id": 34,
       "options": {"legend": {"calcs": ["lastNotNull", "min"], "displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "asc"}},
       "targets": [
@@ -1318,7 +1364,7 @@
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "description": "No data is expected when the resource-pack allowlist is empty. Quantities with different unit labels must never be summed.",
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 118},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 137},
       "id": 35,
       "options": {"cellHeight": "sm", "footer": {"countRows": false, "fields": "", "reducer": ["sum"], "show": false}, "showHeader": true},
       "targets": [
@@ -1377,7 +1423,7 @@
           }
         ]
       },
-      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 126},
+      "gridPos": {"h": 5, "w": 24, "x": 0, "y": 145},
       "id": 36,
       "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
       "targets": [
@@ -1570,14 +1616,14 @@
         "allValue": ".*",
         "current": {"selected": true, "text": "All", "value": "$__all"},
         "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "definition": "label_values({__name__=~\"qiniu_billing_(available_balance|unpaid_amount|estimated_cost|last_finalized_cost|current_year_monthly_finalized_cost)\",qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}, currency)",
+        "definition": "label_values({__name__=~\"qiniu_billing_(available_balance|unpaid_amount|estimated_cost|last_finalized_cost|last_12_months_finalized_cost)\",qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}, currency)",
         "hide": 0,
         "includeAll": true,
         "label": "Currency",
         "multi": true,
         "name": "currency",
         "options": [],
-        "query": {"query": "label_values({__name__=~\"qiniu_billing_(available_balance|unpaid_amount|estimated_cost|last_finalized_cost|current_year_monthly_finalized_cost)\",qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}, currency)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "query": {"query": "label_values({__name__=~\"qiniu_billing_(available_balance|unpaid_amount|estimated_cost|last_finalized_cost|last_12_months_finalized_cost)\",qiniu_account=~\"${qiniu_account:regex}\",job=~\"${job:regex}\",instance=~\"${instance:regex}\"}, currency)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,
@@ -1591,6 +1637,6 @@
   "timezone": "browser",
   "title": "Qiniu Exporter Overview",
   "uid": "qiniu-exporter-overview",
-  "version": 9,
+  "version": 17,
   "weekStart": ""
 }

@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"sort"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -14,6 +15,12 @@ type BillingEstimate struct {
 	PeriodEnd   time.Time
 }
 
+type BillingDailyEstimate struct {
+	Date     time.Time
+	Cost     billing.Fixed8
+	Currency string
+}
+
 type BillingFinalized struct {
 	Detail billing.BillDetail
 	Period billing.BillingPeriod
@@ -24,35 +31,37 @@ type BillingFinalizedMonth struct {
 	Period billing.BillingPeriod
 }
 
-type BillingFinalizedYear struct {
-	Year   int
+type BillingFinalizedMonths struct {
 	Months []BillingFinalizedMonth
 }
 
 type BillingStores struct {
 	Balance       *snapshot.Store[billing.BalanceOverview]
 	Estimate      *snapshot.Store[BillingEstimate]
+	DailyEstimate *snapshot.Store[[]BillingDailyEstimate]
 	ResourcePacks *snapshot.Store[[]billing.ResourcePackMonthOverview]
 	Finalized     *snapshot.Store[BillingFinalized]
-	CurrentYear   *snapshot.Store[BillingFinalizedYear]
+	Last12        *snapshot.Store[BillingFinalizedMonths]
 }
 
 type BillingCollector struct {
 	stores BillingStores
 
-	availableBalance       *prometheus.Desc
-	unpaidAmount           *prometheus.Desc
-	estimatedCost          *prometheus.Desc
-	estimatePeriodStart    *prometheus.Desc
-	estimatePeriodEnd      *prometheus.Desc
-	resourcePackRecords    *prometheus.Desc
-	resourcePackTotal      *prometheus.Desc
-	resourcePackUsed       *prometheus.Desc
-	resourcePackRemaining  *prometheus.Desc
-	resourcePackRatio      *prometheus.Desc
-	finalizedCost          *prometheus.Desc
-	finalizedPeriodStart   *prometheus.Desc
-	currentYearMonthlyCost *prometheus.Desc
+	availableBalance      *prometheus.Desc
+	unpaidAmount          *prometheus.Desc
+	estimatedCost         *prometheus.Desc
+	estimatedDailyCost    *prometheus.Desc
+	estimatePeriodStart   *prometheus.Desc
+	estimatePeriodEnd     *prometheus.Desc
+	resourcePackRecords   *prometheus.Desc
+	resourcePackTotal     *prometheus.Desc
+	resourcePackUsed      *prometheus.Desc
+	resourcePackRemaining *prometheus.Desc
+	resourcePackRatio     *prometheus.Desc
+	finalizedCost         *prometheus.Desc
+	finalizedPeriodStart  *prometheus.Desc
+	last12MonthlyCost     *prometheus.Desc
+	finalizedDailyCost    *prometheus.Desc
 }
 
 func NewBilling(stores BillingStores) *BillingCollector {
@@ -73,6 +82,11 @@ func NewBilling(stores BillingStores) *BillingCollector {
 			"qiniu_billing_estimated_cost",
 			"Estimated cost for the accompanying left-closed, right-open billing period, in the currency's major unit.",
 			[]string{"currency"}, nil,
+		),
+		estimatedDailyCost: prometheus.NewDesc(
+			"qiniu_billing_estimated_daily_cost",
+			"Estimated incremental cost for one completed Asia/Shanghai day, derived from adjacent cumulative snapshots, in the currency's major unit.",
+			[]string{"currency", "date"}, nil,
 		),
 		estimatePeriodStart: prometheus.NewDesc(
 			"qiniu_billing_estimate_period_start_timestamp_seconds",
@@ -119,10 +133,15 @@ func NewBilling(stores BillingStores) *BillingCollector {
 			"Unix timestamp at the start of the most recently available finalized month.",
 			nil, nil,
 		),
-		currentYearMonthlyCost: prometheus.NewDesc(
-			"qiniu_billing_current_year_monthly_finalized_cost",
-			"Finalized cost for one month in the current Asia/Shanghai calendar year, in the currency's major unit.",
+		last12MonthlyCost: prometheus.NewDesc(
+			"qiniu_billing_last_12_months_finalized_cost",
+			"Finalized cost for one of the latest twelve available Asia/Shanghai billing months, in the currency's major unit.",
 			[]string{"currency", "month"}, nil,
+		),
+		finalizedDailyCost: prometheus.NewDesc(
+			"qiniu_billing_finalized_daily_cost",
+			"Finalized cost assigned to one Asia/Shanghai day from daily-billed v2 bill-detail items; monthly-billed items are intentionally excluded.",
+			[]string{"currency", "date"}, nil,
 		),
 	}
 }
@@ -131,6 +150,7 @@ func (c *BillingCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.availableBalance
 	ch <- c.unpaidAmount
 	ch <- c.estimatedCost
+	ch <- c.estimatedDailyCost
 	ch <- c.estimatePeriodStart
 	ch <- c.estimatePeriodEnd
 	ch <- c.resourcePackRecords
@@ -140,7 +160,8 @@ func (c *BillingCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.resourcePackRatio
 	ch <- c.finalizedCost
 	ch <- c.finalizedPeriodStart
-	ch <- c.currentYearMonthlyCost
+	ch <- c.last12MonthlyCost
+	ch <- c.finalizedDailyCost
 }
 
 func (c *BillingCollector) Collect(ch chan<- prometheus.Metric) {
@@ -153,6 +174,13 @@ func (c *BillingCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.estimatedCost, prometheus.GaugeValue, estimate.Snapshot.TotalMoney.MajorUnits(), estimate.Snapshot.Currency)
 		ch <- prometheus.MustNewConstMetric(c.estimatePeriodStart, prometheus.GaugeValue, float64(estimate.PeriodStart.Unix()))
 		ch <- prometheus.MustNewConstMetric(c.estimatePeriodEnd, prometheus.GaugeValue, float64(estimate.PeriodEnd.Unix()))
+	}
+	if c.stores.DailyEstimate != nil {
+		if daily, _, ok := c.stores.DailyEstimate.Load(now); ok {
+			for _, value := range daily {
+				ch <- prometheus.MustNewConstMetric(c.estimatedDailyCost, prometheus.GaugeValue, value.Cost.MajorUnits(), value.Currency, value.Date.Format("2006-01-02"))
+			}
+		}
 	}
 	if packs, _, ok := c.stores.ResourcePacks.Load(now); ok {
 		ch <- prometheus.MustNewConstMetric(c.resourcePackRecords, prometheus.GaugeValue, float64(len(packs)))
@@ -172,17 +200,37 @@ func (c *BillingCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.finalizedCost, prometheus.GaugeValue, finalized.Detail.TotalMoney.MajorUnits(), finalized.Detail.Currency)
 		ch <- prometheus.MustNewConstMetric(c.finalizedPeriodStart, prometheus.GaugeValue, float64(finalized.Period.Start.Unix()))
 	}
-	if currentYear, _, ok := c.stores.CurrentYear.Load(now); ok && currentYear.Year == now.In(billingCollectorLocation).Year() {
-		for _, month := range currentYear.Months {
+	if last12, _, ok := c.stores.Last12.Load(now); ok {
+		for _, month := range last12.Months {
 			ch <- prometheus.MustNewConstMetric(
-				c.currentYearMonthlyCost,
+				c.last12MonthlyCost,
 				prometheus.GaugeValue,
 				month.Detail.TotalMoney.MajorUnits(),
 				month.Detail.Currency,
-				month.Period.Start.Format("01"),
+				month.Period.Start.Format("2006-01"),
 			)
+			for _, daily := range finalizedDailyCosts(month.Detail) {
+				ch <- prometheus.MustNewConstMetric(c.finalizedDailyCost, prometheus.GaugeValue, daily.Cost.MajorUnits(), daily.Currency, daily.Date.Format("2006-01-02"))
+			}
 		}
 	}
+}
+
+func finalizedDailyCosts(detail billing.BillDetail) []BillingDailyEstimate {
+	totals := make(map[string]billing.Fixed8)
+	for _, item := range detail.Items {
+		if !item.End.Equal(item.Start.AddDate(0, 0, 1)) {
+			continue
+		}
+		totals[item.Start.Format("2006-01-02")] += item.ItemMoney
+	}
+	result := make([]BillingDailyEstimate, 0, len(totals))
+	for date, cost := range totals {
+		parsed, _ := time.ParseInLocation("2006-01-02", date, billingCollectorLocation)
+		result = append(result, BillingDailyEstimate{Date: parsed, Cost: cost, Currency: detail.Currency})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Date.Before(result[j].Date) })
+	return result
 }
 
 var billingCollectorLocation = time.FixedZone("Asia/Shanghai", 8*60*60)

@@ -36,6 +36,17 @@ type ResourcePackMonthOverview struct {
 type BillDetail struct {
 	TotalMoney Fixed8
 	Currency   string
+	Items      []BillItem
+}
+
+// BillItem is one finalized billing line. Version 2 preserves exact daily
+// boundaries for daily-billed items; monthly-billed items retain a month span.
+type BillItem struct {
+	Start      time.Time
+	End        time.Time
+	ItemMoney  Fixed8
+	Currency   string
+	BillPeriod string
 }
 
 // BillingPeriod is a left-closed, right-open calendar-month period in

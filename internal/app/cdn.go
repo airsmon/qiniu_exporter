@@ -75,6 +75,9 @@ func RegisterCDN(
 	if stores.Usage == nil {
 		return fmt.Errorf("CDN usage store is required")
 	}
+	if stores.TopIPs == nil {
+		return fmt.Errorf("CDN top IP store is required")
+	}
 	if !cfg.CDN.StatisticsTimezoneVerified {
 		metrics.ObserveSkipped("cdn/analytics", "timezone_unverified")
 		metrics.ObserveSkipped("cdn/monitoring", "timezone_unverified")
@@ -123,8 +126,12 @@ func RegisterCDN(
 		scopeChanged := !slices.Equal(catalog.Snapshot(), domains)
 		if scopeChanged {
 			stores.Usage.Clear()
+			stores.TopIPs.Clear()
 			if cfg.CDN.StatisticsTimezoneVerified && cfg.CDN.MonitoringUnitsVerified {
 				metrics.InitCollector("cdn", "usage")
+			}
+			if cfg.CDN.StatisticsTimezoneVerified {
+				metrics.InitCollector("cdn", "top_ips")
 			}
 		}
 		catalog.Replace(domains)
@@ -206,6 +213,85 @@ func RegisterCDN(
 	}); err != nil {
 		return err
 	}
+
+	metrics.InitCollector("cdn", "top_ips")
+	metrics.SetCollectorStaleAfter("cdn", "top_ips", cfg.Collection.StaleAfter.Realtime.Value())
+	if err := scheduler.Add(poller.Job{
+		Name: "cdn/top_ips", PhaseKey: "cdn/top_ips", Interval: cfg.Collection.Intervals.CDNAnalytics.Value(),
+		Timeout: collectionTimeout(cfg.Collection.Intervals.CDNAnalytics.Value()), RunOnStart: true,
+		Run: func(ctx context.Context) error {
+			domains := waitForCDNDomains(ctx, catalog, 10*time.Second)
+			if len(domains) == 0 {
+				return poller.Skip("no_resources")
+			}
+			return collectAndPublishCDNTopIPs(
+				ctx, client, domains, catalog, location, cfg.Collection.StaleAfter.Realtime.Value(), stores.TopIPs, &usageScopeMu,
+			)
+		},
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func waitForCDNDomains(ctx context.Context, catalog *resourceCatalog[string], maximum time.Duration) []string {
+	timer := time.NewTimer(maximum)
+	defer timer.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if domains := catalog.Snapshot(); len(domains) > 0 {
+			return domains
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-timer.C:
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func collectAndPublishCDNTopIPs(
+	ctx context.Context,
+	client *cdn.Client,
+	domains []string,
+	catalog *resourceCatalog[string],
+	location *time.Location,
+	staleAfter time.Duration,
+	store *snapshot.Store[collector.CDNTopIPSnapshot],
+	scopeMu *sync.Mutex,
+) error {
+	date := time.Now().In(location).Format("2006-01-02")
+	trafficResponses := make([]cdn.TopIPResponse, 0, (len(domains)+99)/100)
+	requestResponses := make([]cdn.TopIPResponse, 0, (len(domains)+99)/100)
+	for _, batch := range batches(domains, 100) {
+		query := cdn.TopIPQuery{Domains: batch, StartDate: date, EndDate: date, Region: cdn.RegionGlobal}
+		traffic, err := client.FetchTopIPTraffic(ctx, query)
+		if err != nil {
+			return fmt.Errorf("fetch top IP traffic: %w", err)
+		}
+		requests, err := client.FetchTopIPRequests(ctx, query)
+		if err != nil {
+			return fmt.Errorf("fetch top IP requests: %w", err)
+		}
+		trafficResponses = append(trafficResponses, traffic)
+		requestResponses = append(requestResponses, requests)
+	}
+	aggregate, err := cdn.MergeTopIPResponses(trafficResponses, requestResponses)
+	if err != nil {
+		return err
+	}
+	scopeMu.Lock()
+	defer scopeMu.Unlock()
+	if !slices.Equal(catalog.Snapshot(), domains) {
+		return fmt.Errorf("cdn: top IP resource scope changed during collection")
+	}
+	collectedAt := time.Now()
+	store.Publish(collector.CDNTopIPSnapshot{
+		Date: date, Traffic: aggregate.Traffic, Requests: aggregate.Requests,
+	}, snapshot.Meta{CollectedAt: collectedAt, StaleAfter: staleAfter})
 	return nil
 }
 
@@ -744,7 +830,32 @@ func buildCDNUsageSnapshot(
 			Complete:     complete,
 		})
 	}
+	if complete && includeMonthTraffic {
+		result.DailyTraffic, err = buildCDNDailyTraffic(priorMonth, todayTraffic, monthStart, window.TodayStart, location)
+		if err != nil {
+			return collector.CDNUsageSnapshot{}, err
+		}
+	}
 	return result, nil
+}
+
+func buildCDNDailyTraffic(
+	priorMonth []cdn.UsageBatch,
+	today cdn.TrafficUsageAggregate,
+	monthStart, todayStart time.Time,
+	location *time.Location,
+) ([]collector.CDNDailyTrafficSnapshot, error) {
+	days := make([]collector.CDNDailyTrafficSnapshot, 0, todayStart.Day())
+	for start := monthStart; start.Before(todayStart); start = start.AddDate(0, 0, 1) {
+		end := start.AddDate(0, 0, 1)
+		usage, err := cdn.AggregateTrafficUsage(priorMonth, cdn.GranularityDay, start, end, location)
+		if err != nil {
+			return nil, fmt.Errorf("aggregate CDN traffic for %s: %w", start.Format("2006-01-02"), err)
+		}
+		days = append(days, collector.CDNDailyTrafficSnapshot{Date: start.Format("2006-01-02"), Bytes: usage.AccountBytes})
+	}
+	days = append(days, collector.CDNDailyTrafficSnapshot{Date: todayStart.Format("2006-01-02"), Bytes: today.AccountBytes})
+	return days, nil
 }
 
 func zeroCDNTrafficUsage(domains []string, at time.Time) cdn.TrafficUsageAggregate {

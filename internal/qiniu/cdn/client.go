@@ -23,9 +23,12 @@ const (
 	requestCountPath        = "/v2/tune/loganalyze/reqcount"
 	statusCodePath          = "/v2/tune/loganalyze/statuscode"
 	hitMissPath             = "/v2/tune/loganalyze/hitmiss"
+	topTrafficIPPath        = "/v2/tune/loganalyze/toptrafficip"
+	topCountIPPath          = "/v2/tune/loganalyze/topcountip"
 
-	maxUsageDomains  = 50
-	maxResponseBytes = 16 << 20
+	maxUsageDomains     = 50
+	maxAnalyticsDomains = 100
+	maxResponseBytes    = 16 << 20
 )
 
 var (
@@ -44,7 +47,7 @@ type Client struct {
 	baseURL string
 }
 
-// NewClient creates a client that can call only the seven CDN P0 statistics
+// NewClient creates a client that can call only the fixed CDN P0 statistics
 // endpoints in this package. An empty baseURL selects DefaultBaseURL.
 func NewClient(doer Doer, baseURL string) (*Client, error) {
 	if doer == nil {
@@ -92,6 +95,13 @@ type DomainQuery struct {
 type RegionalDomainQuery struct {
 	DomainQuery
 	Region string
+}
+
+type TopIPQuery struct {
+	Domains   []string
+	StartDate string
+	EndDate   string
+	Region    string
 }
 
 // MonitoringResponse is the official response shape shared by monitoring
@@ -147,6 +157,18 @@ type HitMissData struct {
 	Miss        []float64 `json:"miss"`
 	TrafficHit  []float64 `json:"trafficHit"`
 	TrafficMiss []float64 `json:"trafficMiss"`
+}
+
+type TopIPResponse struct {
+	Code  int       `json:"code"`
+	Error string    `json:"error"`
+	Data  TopIPData `json:"data"`
+}
+
+type TopIPData struct {
+	IPs     []string  `json:"ips"`
+	Traffic []float64 `json:"traffic"`
+	Count   []float64 `json:"count"`
 }
 
 // HTTPStatusError reports a non-2xx HTTP response without retaining a
@@ -243,6 +265,14 @@ func (c *Client) FetchHitMiss(ctx context.Context, query DomainQuery) (HitMissRe
 	return result, checkBusinessCode(result.Code, result.Error)
 }
 
+func (c *Client) FetchTopIPTraffic(ctx context.Context, query TopIPQuery) (TopIPResponse, error) {
+	return c.fetchTopIPs(ctx, topTrafficIPPath, query)
+}
+
+func (c *Client) FetchTopIPRequests(ctx context.Context, query TopIPQuery) (TopIPResponse, error) {
+	return c.fetchTopIPs(ctx, topCountIPPath, query)
+}
+
 type monitoringRequest struct {
 	Domains     string `json:"domains"`
 	StartDate   string `json:"startDate"`
@@ -263,6 +293,27 @@ type regionalAnalyticsRequest struct {
 	EndDate   string   `json:"endDate"`
 	Freq      string   `json:"freq"`
 	Region    string   `json:"region"`
+}
+
+type topIPRequest struct {
+	Domains   []string `json:"domains"`
+	StartDate string   `json:"startDate"`
+	EndDate   string   `json:"endDate"`
+	Region    string   `json:"region"`
+}
+
+func (c *Client) fetchTopIPs(ctx context.Context, path string, query TopIPQuery) (TopIPResponse, error) {
+	var result TopIPResponse
+	if err := validateTopIPQuery(query); err != nil {
+		return result, err
+	}
+	payload := topIPRequest{
+		Domains: query.Domains, StartDate: query.StartDate, EndDate: query.EndDate, Region: query.Region,
+	}
+	if err := c.postJSON(ctx, path, payload, &result); err != nil {
+		return result, err
+	}
+	return result, checkBusinessCode(result.Code, result.Error)
 }
 
 func (c *Client) fetchMonitoring(ctx context.Context, path string, query MonitoringQuery) (MonitoringResponse, error) {
@@ -368,6 +419,26 @@ func validateMeteringQuery(query MeteringQuery) error {
 		return fmt.Errorf("%w: invalid metering granularity", ErrInvalidInput)
 	}
 	return validateDateRange(query.StartDate, query.EndDate, 31)
+}
+
+func validateTopIPQuery(query TopIPQuery) error {
+	if len(query.Domains) == 0 || len(query.Domains) > maxAnalyticsDomains {
+		return fmt.Errorf("%w: top IP domains must contain 1 to %d entries", ErrInvalidInput, maxAnalyticsDomains)
+	}
+	seen := make(map[string]struct{}, len(query.Domains))
+	for _, domain := range query.Domains {
+		if err := validateDomain(domain, true); err != nil {
+			return err
+		}
+		if _, exists := seen[domain]; exists {
+			return fmt.Errorf("%w: duplicate top IP domain", ErrInvalidInput)
+		}
+		seen[domain] = struct{}{}
+	}
+	if query.Region != RegionGlobal && query.Region != RegionChina && query.Region != RegionOversea {
+		return fmt.Errorf("%w: invalid top IP region", ErrInvalidInput)
+	}
+	return validateDateRange(query.StartDate, query.EndDate, 30)
 }
 
 func validateUsageDomains(domains []string) error {

@@ -166,8 +166,14 @@ reads the exporter's cached `/metrics` endpoint; it does not trigger Qiniu API
 requests. The generated exporter configuration independently polls Kodo/CDN
 statistics every `30m` and refreshes resource discovery every `1h` by default.
 The built-in PrometheusRule mirrors `rules/qiniu-exporter.rules.yml`, including
-collection failure/staleness, low balance/resource-pack, CDN quality alerts,
-and CDN/Kodo recording rules. Set `prometheusRule.builtinRules: false` to use
+collection failure/staleness, low balance/resource-pack, CDN quality and daily
+traffic alerts, and CDN/Kodo recording rules. `QiniuCDNDailyTrafficHigh` is
+active only for 11 minutes after the current-day total crosses 300 GiB. Route
+its `notification_policy="three_times"` label with Alertmanager
+`group_wait: 30s` and `repeat_interval: 5m` to send at most three notifications.
+Use a dedicated receiver with `send_resolved: false`; otherwise the recovery
+message is an additional notification after the 11-minute firing window.
+Set `prometheusRule.builtinRules: false` to use
 only complete groups supplied through `prometheusRule.additionalGroups`.
 
 ## Security and operational notes

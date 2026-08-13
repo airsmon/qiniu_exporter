@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -37,6 +38,7 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 		Monitoring: &snapshot.ResourceStore[CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[CDNAnalyticsSnapshot]{},
 		Usage:      &snapshot.Store[CDNUsageSnapshot]{},
+		TopIPs:     &snapshot.Store[CDNTopIPSnapshot]{},
 	}
 	cdnStores.Inventory.Publish([]cdn.Domain{{Name: "cdn.example.com", OperatingState: "success", Product: "cdn"}}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
 	cdnStores.Monitoring.Publish("cdn.example.com", CDNMonitoringSnapshot{
@@ -48,7 +50,7 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 		Statuses: []cdn.StatusCodeRateSample{{Domain: "cdn.example.com", Region: cdn.RegionGlobal, Code: "2xx", ResponsesPerSecond: 9}},
 		Cache:    cdn.CacheSample{Domain: "cdn.example.com", HitRequestsPerSecond: 8, MissRequestsPerSecond: 2, RequestHitRatio: 0.8, RequestHitRatioValid: true},
 	}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
-	cdnStores.Usage.Publish(CDNUsageSnapshot{Periods: []CDNUsagePeriodSnapshot{{
+	cdnStores.Usage.Publish(CDNUsageSnapshot{DailyTraffic: []CDNDailyTrafficSnapshot{{Date: now.In(cdnCollectorLocation).Format("2006-01-02"), Bytes: 4096}}, Periods: []CDNUsagePeriodSnapshot{{
 		Period: CDNUsagePeriodToday,
 		Traffic: cdn.TrafficUsageAggregate{
 			Domains:      []cdn.DomainTrafficUsage{{Domain: "cdn.example.com", Bytes: 4096, Active: true}},
@@ -61,26 +63,32 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 		HasBandwidth: true,
 		Complete:     true,
 	}}}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
+	cdnStores.TopIPs.Publish(CDNTopIPSnapshot{
+		Date:     now.In(cdnCollectorLocation).Format("2006-01-02"),
+		Traffic:  []cdn.TopIPValue{{IP: "192.0.2.1", Value: 2048}},
+		Requests: []cdn.TopIPValue{{IP: "2001:db8::1", Value: 42}},
+	}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
 	registry.MustRegister(NewCDN(cdnStores))
 
 	billingStores := BillingStores{
 		Balance:       &snapshot.Store[billing.BalanceOverview]{},
 		Estimate:      &snapshot.Store[BillingEstimate]{},
+		DailyEstimate: &snapshot.Store[[]BillingDailyEstimate]{},
 		ResourcePacks: &snapshot.Store[[]billing.ResourcePackMonthOverview]{},
 		Finalized:     &snapshot.Store[BillingFinalized]{},
-		CurrentYear:   &snapshot.Store[BillingFinalizedYear]{},
+		Last12:        &snapshot.Store[BillingFinalizedMonths]{},
 	}
 	billingStores.Balance.Publish(billing.BalanceOverview{AvailableBalance: billing.Fixed8(1_230_000_000), UnpaidMoney: billing.Fixed8(100_000_000), Currency: "CNY"}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
+	billingStores.DailyEstimate.Publish([]BillingDailyEstimate{{Date: now.AddDate(0, 0, -1), Cost: billing.Fixed8(25_000_000), Currency: "CNY"}}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
 	billingStores.ResourcePacks.Publish([]billing.ResourcePackMonthOverview{{ItemName: "traffic", ZoneName: "global", AvailableTime: "month", Unit: "GB", TotalSurplus: 10, MonthUsed: 2, MonthRemain: 8}}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
 	billingYear := now.In(billingCollectorLocation).Year()
 	billingStores.Finalized.Publish(BillingFinalized{
 		Detail: billing.BillDetail{TotalMoney: billing.Fixed8(600_000_000), Currency: "CNY"},
 		Period: billing.BillingPeriod{Start: time.Date(billingYear, time.June, 1, 0, 0, 0, 0, time.UTC), End: time.Date(billingYear, time.July, 1, 0, 0, 0, 0, time.UTC)},
 	}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
-	billingStores.CurrentYear.Publish(BillingFinalizedYear{
-		Year: billingYear,
+	billingStores.Last12.Publish(BillingFinalizedMonths{
 		Months: []BillingFinalizedMonth{
-			{Detail: billing.BillDetail{TotalMoney: billing.Fixed8(100_000_000), Currency: "CNY"}, Period: billing.BillingPeriod{Start: time.Date(billingYear, time.January, 1, 0, 0, 0, 0, time.UTC), End: time.Date(billingYear, time.February, 1, 0, 0, 0, 0, time.UTC)}},
+			{Detail: billing.BillDetail{TotalMoney: billing.Fixed8(100_000_000), Currency: "CNY", Items: []billing.BillItem{{Start: time.Date(billingYear, time.January, 3, 0, 0, 0, 0, billingCollectorLocation), End: time.Date(billingYear, time.January, 4, 0, 0, 0, 0, billingCollectorLocation), ItemMoney: billing.Fixed8(40_000_000), Currency: "CNY", BillPeriod: "daily"}}}, Period: billing.BillingPeriod{Start: time.Date(billingYear, time.January, 1, 0, 0, 0, 0, time.UTC), End: time.Date(billingYear, time.February, 1, 0, 0, 0, 0, time.UTC)}},
 			{Detail: billing.BillDetail{TotalMoney: billing.Fixed8(200_000_000), Currency: "CNY"}, Period: billing.BillingPeriod{Start: time.Date(billingYear, time.February, 1, 0, 0, 0, 0, time.UTC), End: time.Date(billingYear, time.March, 1, 0, 0, 0, 0, time.UTC)}},
 		},
 	}, snapshot.Meta{CollectedAt: now, StaleAfter: time.Hour})
@@ -100,7 +108,7 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 				kodoInventoryLabels[label.GetName()] = label.GetValue()
 			}
 		}
-		if family.GetName() == "qiniu_billing_current_year_monthly_finalized_cost" {
+		if family.GetName() == "qiniu_billing_last_12_months_finalized_cost" {
 			for _, metric := range family.Metric {
 				if len(metric.Label) != 2 {
 					t.Fatalf("monthly finalized metric labels = %d, want exactly currency and month", len(metric.Label))
@@ -109,7 +117,7 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 				for _, label := range metric.Label {
 					labels[label.GetName()] = label.GetValue()
 				}
-				if labels["currency"] != "CNY" || (labels["month"] != "01" && labels["month"] != "02") {
+				if labels["currency"] != "CNY" || (labels["month"] != fmt.Sprintf("%d-01", billingYear) && labels["month"] != fmt.Sprintf("%d-02", billingYear)) {
 					t.Fatalf("unexpected monthly finalized labels: %#v", labels)
 				}
 				monthlyLabels[labels["month"]] = metric.GetGauge().GetValue()
@@ -122,20 +130,22 @@ func TestBusinessCollectorsReadOnlyPublishedSnapshots(t *testing.T) {
 		"qiniu_kodo_usage_egress_bytes", "qiniu_kodo_usage_requests",
 		"qiniu_cdn_domains", "qiniu_cdn_domain_info",
 		"qiniu_cdn_monitoring_bandwidth_bits_per_second", "qiniu_cdn_monitoring_traffic_bytes_per_second", "qiniu_cdn_requests_per_second", "qiniu_cdn_http_responses_per_second",
-		"qiniu_cdn_usage_traffic_bytes", "qiniu_cdn_usage_peak_bandwidth_bits_per_second", "qiniu_cdn_usage_account_traffic_bytes", "qiniu_cdn_usage_account_peak_bandwidth_bits_per_second", "qiniu_cdn_usage_active_domains", "qiniu_cdn_usage_complete",
+		"qiniu_cdn_usage_traffic_bytes", "qiniu_cdn_usage_peak_bandwidth_bits_per_second", "qiniu_cdn_usage_account_traffic_bytes", "qiniu_cdn_usage_account_daily_traffic_bytes", "qiniu_cdn_usage_account_peak_bandwidth_bits_per_second", "qiniu_cdn_usage_active_domains", "qiniu_cdn_usage_complete",
+		"qiniu_cdn_top_client_ip_traffic_bytes", "qiniu_cdn_top_client_ip_requests",
 		"qiniu_billing_available_balance", "qiniu_billing_unpaid_amount", "qiniu_billing_resource_pack_records", "qiniu_billing_resource_pack_remaining_ratio",
-		"qiniu_billing_last_finalized_cost", "qiniu_billing_current_year_monthly_finalized_cost",
+		"qiniu_billing_last_finalized_cost", "qiniu_billing_last_12_months_finalized_cost",
+		"qiniu_billing_estimated_daily_cost", "qiniu_billing_finalized_daily_cost",
 	}
 	for _, name := range want {
 		if names[name] == 0 {
 			t.Errorf("metric family %s was not collected", name)
 		}
 	}
-	if got := names["qiniu_billing_current_year_monthly_finalized_cost"]; got != 2 {
-		t.Fatalf("current-year monthly finalized series = %d, want 2", got)
+	if got := names["qiniu_billing_last_12_months_finalized_cost"]; got != 2 {
+		t.Fatalf("last-12-month monthly finalized series = %d, want 2", got)
 	}
-	if monthlyLabels["01"] != 1 || monthlyLabels["02"] != 2 {
-		t.Fatalf("current-year monthly finalized values = %#v, want 01=1 and 02=2", monthlyLabels)
+	if monthlyLabels[fmt.Sprintf("%d-01", billingYear)] != 1 || monthlyLabels[fmt.Sprintf("%d-02", billingYear)] != 2 {
+		t.Fatalf("last-12-month monthly finalized values = %#v", monthlyLabels)
 	}
 	if got := names["qiniu_kodo_bucket_info"]; got != 1 {
 		t.Fatalf("Kodo bucket inventory series = %d, want 1", got)
@@ -183,6 +193,7 @@ func TestCDNCollectorOmitsIncompleteAccountUsage(t *testing.T) {
 		Monitoring: &snapshot.ResourceStore[CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[CDNAnalyticsSnapshot]{},
 		Usage:      &snapshot.Store[CDNUsageSnapshot]{},
+		TopIPs:     &snapshot.Store[CDNTopIPSnapshot]{},
 	}
 	stores.Usage.Publish(CDNUsageSnapshot{Periods: []CDNUsagePeriodSnapshot{{
 		Period: CDNUsagePeriodToday,
@@ -214,17 +225,17 @@ func TestCDNCollectorOmitsIncompleteAccountUsage(t *testing.T) {
 	}
 }
 
-func TestBillingCollectorHidesPriorYearHistory(t *testing.T) {
+func TestBillingCollectorIncludesPriorYearInRollingWindow(t *testing.T) {
 	now := time.Now()
 	stores := BillingStores{
 		Balance:       &snapshot.Store[billing.BalanceOverview]{},
 		Estimate:      &snapshot.Store[BillingEstimate]{},
+		DailyEstimate: &snapshot.Store[[]BillingDailyEstimate]{},
 		ResourcePacks: &snapshot.Store[[]billing.ResourcePackMonthOverview]{},
 		Finalized:     &snapshot.Store[BillingFinalized]{},
-		CurrentYear:   &snapshot.Store[BillingFinalizedYear]{},
+		Last12:        &snapshot.Store[BillingFinalizedMonths]{},
 	}
-	stores.CurrentYear.Publish(BillingFinalizedYear{
-		Year: now.In(billingCollectorLocation).Year() - 1,
+	stores.Last12.Publish(BillingFinalizedMonths{
 		Months: []BillingFinalizedMonth{{
 			Detail: billing.BillDetail{TotalMoney: billing.Fixed8(100_000_000), Currency: "CNY"},
 			Period: billing.BillingPeriod{Start: now.AddDate(-1, 0, 0), End: now.AddDate(-1, 1, 0)},
@@ -237,9 +248,24 @@ func TestBillingCollectorHidesPriorYearHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	found := false
 	for _, family := range families {
-		if family.GetName() == "qiniu_billing_current_year_monthly_finalized_cost" {
-			t.Fatal("prior-year monthly finalized series was exported")
-		}
+		found = found || family.GetName() == "qiniu_billing_last_12_months_finalized_cost"
+	}
+	if !found {
+		t.Fatal("in-range prior-year monthly finalized series was not exported")
+	}
+}
+
+func TestFinalizedDailyCostsExcludeMonthlyItems(t *testing.T) {
+	location := billingCollectorLocation
+	detail := billing.BillDetail{Currency: "CNY", Items: []billing.BillItem{
+		{Start: time.Date(2026, time.July, 3, 0, 0, 0, 0, location), End: time.Date(2026, time.July, 4, 0, 0, 0, 0, location), ItemMoney: 100_000_000, Currency: "CNY", BillPeriod: "daily"},
+		{Start: time.Date(2026, time.July, 3, 0, 0, 0, 0, location), End: time.Date(2026, time.July, 4, 0, 0, 0, 0, location), ItemMoney: 50_000_000, Currency: "CNY", BillPeriod: "daily"},
+		{Start: time.Date(2026, time.July, 1, 0, 0, 0, 0, location), End: time.Date(2026, time.August, 1, 0, 0, 0, 0, location), ItemMoney: 900_000_000, Currency: "CNY", BillPeriod: "monthly"},
+	}}
+	got := finalizedDailyCosts(detail)
+	if len(got) != 1 || got[0].Date.Format("2006-01-02") != "2026-07-03" || got[0].Cost != 150_000_000 {
+		t.Fatalf("finalizedDailyCosts() = %#v", got)
 	}
 }

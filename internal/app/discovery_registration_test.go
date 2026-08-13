@@ -140,6 +140,7 @@ func TestCDNStartupDiscoveryFailureIsNonfatalAndRetried(t *testing.T) {
 		Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
 		Usage:      &snapshot.Store[collector.CDNUsageSnapshot]{},
+		TopIPs:     &snapshot.Store[collector.CDNTopIPSnapshot]{},
 	}
 
 	if err := RegisterCDN(scheduler, nil, discoverer, cfg, stores, metrics); err != nil {
@@ -229,6 +230,7 @@ func TestCDNInventoryIncludesInactiveDomainsWhileStatisticsAreGated(t *testing.T
 		Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
 		Usage:      &snapshot.Store[collector.CDNUsageSnapshot]{},
+		TopIPs:     &snapshot.Store[collector.CDNTopIPSnapshot]{},
 	}
 	registry.MustRegister(collector.NewCDN(stores))
 

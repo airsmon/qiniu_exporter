@@ -49,6 +49,8 @@ func TestProductionPoliciesContainOnlyFixedReadQueries(t *testing.T) {
 			{Method: http.MethodPost, Path: "/v2/tune/loganalyze/reqcount", Name: "request_count"},
 			{Method: http.MethodPost, Path: "/v2/tune/loganalyze/statuscode", Name: "status_code"},
 			{Method: http.MethodPost, Path: "/v2/tune/loganalyze/hitmiss", Name: "hit_miss"},
+			{Method: http.MethodPost, Path: "/v2/tune/loganalyze/toptrafficip", Name: "top_traffic_ip"},
+			{Method: http.MethodPost, Path: "/v2/tune/loganalyze/topcountip", Name: "top_request_ip"},
 		}}},
 		{name: "cdn discovery", policy: cdnDiscoveryPolicy(), want: authhttp.Policy{Host: "api.qiniu.com", Endpoints: []authhttp.Endpoint{
 			{Method: http.MethodGet, Path: "/domain", Name: "list_domains"},

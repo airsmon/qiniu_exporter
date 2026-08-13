@@ -181,6 +181,7 @@ func run(configPath string, logger *slog.Logger) error {
 			Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 			Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
 			Usage:      &snapshot.Store[collector.CDNUsageSnapshot]{},
+			TopIPs:     &snapshot.Store[collector.CDNTopIPSnapshot]{},
 		}
 		registry.MustRegister(collector.NewCDN(stores))
 		if !cfg.CDN.StatisticsTimezoneVerified {
@@ -224,9 +225,10 @@ func run(configPath string, logger *slog.Logger) error {
 		stores := collector.BillingStores{
 			Balance:       &snapshot.Store[billing.BalanceOverview]{},
 			Estimate:      &snapshot.Store[collector.BillingEstimate]{},
+			DailyEstimate: &snapshot.Store[[]collector.BillingDailyEstimate]{},
 			ResourcePacks: &snapshot.Store[[]billing.ResourcePackMonthOverview]{},
 			Finalized:     &snapshot.Store[collector.BillingFinalized]{},
-			CurrentYear:   &snapshot.Store[collector.BillingFinalizedYear]{},
+			Last12:        &snapshot.Store[collector.BillingFinalizedMonths]{},
 		}
 		registry.MustRegister(collector.NewBilling(stores))
 		if len(cfg.Billing.ResourcePackAllowlist) == 0 {
@@ -331,6 +333,8 @@ func cdnPolicy() authhttp.Policy {
 		{Method: http.MethodPost, Path: "/v2/tune/loganalyze/reqcount", Name: "request_count"},
 		{Method: http.MethodPost, Path: "/v2/tune/loganalyze/statuscode", Name: "status_code"},
 		{Method: http.MethodPost, Path: "/v2/tune/loganalyze/hitmiss", Name: "hit_miss"},
+		{Method: http.MethodPost, Path: "/v2/tune/loganalyze/toptrafficip", Name: "top_traffic_ip"},
+		{Method: http.MethodPost, Path: "/v2/tune/loganalyze/topcountip", Name: "top_request_ip"},
 	}}
 }
 

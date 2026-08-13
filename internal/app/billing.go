@@ -33,9 +33,9 @@ type finalizedHistoryCache struct {
 }
 
 type finalizedCollection struct {
-	Latest              collector.BillingFinalized
-	CurrentYear         collector.BillingFinalizedYear
-	CurrentYearComplete bool
+	Latest         collector.BillingFinalized
+	Last12         collector.BillingFinalizedMonths
+	Last12Complete bool
 }
 
 func (cache *finalizedHistoryCache) collect(ctx context.Context, client billDetailClient, now time.Time) (finalizedCollection, error) {
@@ -45,14 +45,12 @@ func (cache *finalizedHistoryCache) collect(ctx context.Context, client billDeta
 	if cache.months == nil {
 		cache.months = make(map[string]collector.BillingFinalizedMonth)
 	}
-	periods := billing.CurrentYearFinalizedPeriods(now)
-	result := finalizedCollection{
-		CurrentYear: collector.BillingFinalizedYear{Year: now.In(billingHistoryLocation).Year()},
-	}
+	periods := billing.Last12FinalizedPeriods(now)
+	result := finalizedCollection{Last12: collector.BillingFinalizedMonths{}}
 	latestPeriod := billing.SelectPeriods(now).Finalized
 	latest, err := cache.fetch(ctx, client, latestPeriod)
 	if err != nil {
-		result.CurrentYearComplete = len(periods) == 0
+		result.Last12Complete = len(periods) == 0
 		return result, err
 	}
 	result.Latest = collector.BillingFinalized{Detail: latest.Detail, Period: latest.Period}
@@ -65,21 +63,21 @@ func (cache *finalizedHistoryCache) collect(ctx context.Context, client billDeta
 		}
 	}
 
-	currentYear := make([]collector.BillingFinalizedMonth, 0, len(periods))
+	last12 := make([]collector.BillingFinalizedMonth, 0, len(periods))
 	keep := make(map[string]collector.BillingFinalizedMonth, len(periods)+1)
 	for _, period := range periods {
 		key := finalizedPeriodKey(period)
 		if month, ok := cache.months[key]; ok {
-			currentYear = append(currentYear, month)
+			last12 = append(last12, month)
 			keep[key] = month
 		}
 	}
 	keep[finalizedPeriodKey(latestPeriod)] = latest
 	cache.months = keep
 	if historyErr == nil {
-		result.CurrentYearComplete = true
+		result.Last12Complete = true
 	}
-	result.CurrentYear.Months = currentYear
+	result.Last12.Months = last12
 	return result, historyErr
 }
 
@@ -119,6 +117,8 @@ func RegisterBilling(
 	metrics.SetCollectorStaleAfter("billing", "estimate", stale.Daily)
 	metrics.InitCollector("billing", "finalized")
 	metrics.SetCollectorStaleAfter("billing", "finalized", stale.Finalized)
+	estimateSnapshots := make(map[string]billing.BillSnapshot)
+	estimateMonth := ""
 	if err := scheduler.Add(poller.Job{
 		Name:       "billing/balance",
 		Interval:   time.Hour,
@@ -159,9 +159,23 @@ func RegisterBilling(
 				return err
 			}
 			periodStart, periodEnd := estimatePeriod(periods.SnapshotDate)
+			month := periods.SnapshotDate.Format("2006-01")
+			if month != estimateMonth {
+				clear(estimateSnapshots)
+				estimateMonth = month
+			}
+			estimateSnapshots[periods.SnapshotDate.Format("2006-01-02")] = value
+			daily, err := collectDailyEstimates(ctx, client, periods.SnapshotDate, estimateSnapshots)
+			if err != nil {
+				return err
+			}
+			collectedAt := time.Now()
 			stores.Estimate.Publish(collector.BillingEstimate{
 				Snapshot: value, PeriodStart: periodStart, PeriodEnd: periodEnd,
-			}, snapshot.Meta{CollectedAt: time.Now(), DataAt: periodEnd, StaleAfter: stale.Daily})
+			}, snapshot.Meta{CollectedAt: collectedAt, DataAt: periodEnd, StaleAfter: stale.Daily})
+			if stores.DailyEstimate != nil {
+				stores.DailyEstimate.Publish(daily, snapshot.Meta{CollectedAt: collectedAt, DataAt: periodEnd, StaleAfter: stale.Daily})
+			}
 			metrics.SetDataTimestamp("billing", "estimate", periodEnd)
 			return nil
 		},
@@ -211,8 +225,8 @@ func RegisterBilling(
 				})
 				metrics.SetDataTimestamp("billing", "finalized", value.Latest.Period.End)
 			}
-			if value.CurrentYearComplete {
-				stores.CurrentYear.Publish(value.CurrentYear, snapshot.Meta{
+			if value.Last12Complete {
+				stores.Last12.Publish(value.Last12, snapshot.Meta{
 					CollectedAt: now, StaleAfter: stale.Finalized,
 				})
 			}
@@ -222,6 +236,44 @@ func RegisterBilling(
 		return err
 	}
 	return nil
+}
+
+type billSnapshotClient interface {
+	BillSnapshot(context.Context, time.Time) (billing.BillSnapshot, error)
+}
+
+func collectDailyEstimates(ctx context.Context, client billSnapshotClient, snapshotDate time.Time, cache map[string]billing.BillSnapshot) ([]collector.BillingDailyEstimate, error) {
+	if snapshotDate.Day() == 1 {
+		return nil, nil
+	}
+	firstSnapshot := time.Date(snapshotDate.Year(), snapshotDate.Month(), 2, 0, 0, 0, 0, snapshotDate.Location())
+	result := make([]collector.BillingDailyEstimate, 0, snapshotDate.Day()-1)
+	var previous billing.BillSnapshot
+	for date := firstSnapshot; !date.After(snapshotDate); date = date.AddDate(0, 0, 1) {
+		key := date.Format("2006-01-02")
+		current, ok := cache[key]
+		if !ok {
+			var err error
+			current, err = client.BillSnapshot(ctx, date)
+			if err != nil {
+				return nil, fmt.Errorf("fetch billing snapshot %s: %w", key, err)
+			}
+			cache[key] = current
+		}
+		if err := validateCurrency(current.Currency); err != nil {
+			return nil, err
+		}
+		cost := current.TotalMoney
+		if date.Day() > 2 {
+			if previous.Currency != current.Currency {
+				return nil, errors.New("billing: adjacent snapshots use different currencies")
+			}
+			cost -= previous.TotalMoney
+		}
+		result = append(result, collector.BillingDailyEstimate{Date: date.AddDate(0, 0, -1), Cost: cost, Currency: current.Currency})
+		previous = current
+	}
+	return result, nil
 }
 
 func estimatePeriod(snapshotDate time.Time) (time.Time, time.Time) {

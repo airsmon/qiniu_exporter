@@ -15,7 +15,8 @@ Cloud.
   state, plus bandwidth, traffic, request rate, HTTP response rate, and cache
   hit metrics.
 - **Billing**: account balance, estimated cost, resource-pack usage, the most
-  recent finalized month, and finalized monthly costs for the current year.
+  recent finalized month, daily estimated/finalized costs, and the latest
+  twelve finalized monthly costs.
 
 The exporter calls only a fixed allowlist of read-only discovery, statistics,
 and billing endpoints. Discovery exports bounded inventory state needed for
@@ -67,15 +68,17 @@ classes and billing resource-pack tuples remain explicitly configured.
 | Kodo period usage | `qiniu_kodo_usage_egress_bytes`, `qiniu_kodo_usage_requests` | `bucket`, `region`, `period`, plus `route` or `operation` | Natural-month-to-date gauges assembled from Qiniu day buckets; requires the Kodo timezone gate. |
 | CDN inventory | `qiniu_cdn_domains`, `qiniu_cdn_domain_info` | `domain`, `operating_state`, `product` on the info metric | Read-only discovery runs independently of the CDN statistics gates. `operating_state` describes the latest Qiniu domain-management operation, not availability. |
 | CDN monitoring | `qiniu_cdn_monitoring_bandwidth_bits_per_second`, `qiniu_cdn_monitoring_traffic_bytes_per_second` | `domain`, `region` | Requires the CDN timezone and monitoring-unit gates. |
-| CDN period usage | `qiniu_cdn_usage_traffic_bytes`, `qiniu_cdn_usage_peak_bandwidth_bits_per_second`, `qiniu_cdn_usage_account_traffic_bytes`, `qiniu_cdn_usage_account_peak_bandwidth_bits_per_second`, `qiniu_cdn_usage_active_domains`, `qiniu_cdn_usage_complete` | `period`; domain metrics also use `domain` | Exact `last_complete_hour`, `today`, and `current_month` traffic/peak summaries. Current-month traffic uses completed metering days plus today. Exact monthly peak bandwidth uses five-minute points; completed days are backfilled in three-day windows and cached in memory. Account metrics are omitted when the discovered domain scope is incomplete. |
+| CDN period usage | `qiniu_cdn_usage_traffic_bytes`, `qiniu_cdn_usage_peak_bandwidth_bits_per_second`, `qiniu_cdn_usage_account_traffic_bytes`, `qiniu_cdn_usage_account_daily_traffic_bytes`, `qiniu_cdn_usage_account_peak_bandwidth_bits_per_second`, `qiniu_cdn_usage_active_domains`, `qiniu_cdn_usage_complete` | `period`; domain metrics also use `domain`; daily account traffic uses `date` | Exact `last_complete_hour`, `today`, and `current_month` traffic/peak summaries, plus current-month daily all-domain traffic. Completed days use metering data and today uses complete five-minute monitoring buckets. Exact monthly peak bandwidth uses five-minute points; completed days are backfilled in three-day windows and cached in memory. Account metrics are omitted when the discovered domain scope is incomplete. |
+| CDN client IP Top 10 | `qiniu_cdn_top_client_ip_traffic_bytes`, `qiniu_cdn_top_client_ip_requests` | `ip`, `rank`, `period` | Current-day account view across all active discovered domains. Domains are queried in batches of at most 100 and identical IPs are summed before selecting the final Top 10. For accounts with more than 100 domains this is approximate because Qiniu returns only each batch's Top 100. |
 | CDN requests and responses | `qiniu_cdn_requests_per_second`, `qiniu_cdn_http_responses_per_second` | `domain,region`; responses also use `code` | Requires the CDN timezone gate; status-code labels are validated. |
 | CDN cache rates | `qiniu_cdn_cache_requests_per_second`, `qiniu_cdn_cache_traffic_bytes_per_second` | `domain,result` | `result` is `hit` or `miss`. |
 | CDN cache ratios | `qiniu_cdn_cache_request_hit_ratio`, `qiniu_cdn_cache_traffic_hit_ratio` | `domain` | Omitted when the corresponding denominator is zero. |
+| Billing daily costs | `qiniu_billing_estimated_daily_cost`, `qiniu_billing_finalized_daily_cost` | `currency,date` | The estimate is the next-day increment between cumulative snapshots. Finalized daily cost includes only v2 bill-detail items whose exact interval is one day; monthly-billed items are not distributed artificially. |
 | Billing balance | `qiniu_billing_available_balance`, `qiniu_billing_unpaid_amount` | `currency` | Requires an account with financial API access. |
 | Billing estimate | `qiniu_billing_estimated_cost`, `qiniu_billing_estimate_period_start_timestamp_seconds`, `qiniu_billing_estimate_period_end_timestamp_seconds` | `currency` on cost | Current estimated billing period. |
 | Billing resource packs | `qiniu_billing_resource_pack_records`, `qiniu_billing_resource_pack_total`, `qiniu_billing_resource_pack_used`, `qiniu_billing_resource_pack_remaining`, `qiniu_billing_resource_pack_remaining_ratio` | `item`, `zone`, `available_time`, `unit` on quantities | Disabled when `resource_pack_allowlist` is empty. Never aggregate across `unit`. |
 | Billing finalized cost | `qiniu_billing_last_finalized_cost`, `qiniu_billing_last_finalized_period_start_timestamp_seconds` | `currency` on cost | Most recently available finalized month. |
-| Billing current-year finalized costs | `qiniu_billing_current_year_monthly_finalized_cost` | `currency`, `month` | Complete finalized months in the current Asia/Shanghai calendar year; `month` is fixed to `01`–`12`. |
+| Billing last 12 finalized months | `qiniu_billing_last_12_months_finalized_cost` | `currency`, `month` | Latest twelve finalized Asia/Shanghai billing months; `month` is `YYYY-MM`. |
 | Exporter health | `qiniu_exporter_*` | Varies by metric | Collector success, freshness, API activity, rate limiting, scheduler, and build information. |
 
 The registry also exposes the standard Go runtime and process metric families,
@@ -386,8 +389,8 @@ for resource discovery. These values are configured under
 `collection.intervals`, independently from Prometheus scrape configuration.
 
 Billing runs on low-frequency accounting schedules. On process start, the
-finalized-bill job fills the already finalized months of the current
-Asia/Shanghai year with at most 11 distinct sequential `bill/detail` monthly
+finalized-bill job fills the latest twelve finalized Asia/Shanghai billing
+months with 12 distinct sequential `bill/detail` monthly
 operations through the existing 1 QPS/concurrency-1 limits. Each operation may
 make up to three bounded HTTP attempts when retryable errors occur, subject to
 the job deadline. Successful immutable months are kept in memory, so the daily
@@ -414,10 +417,10 @@ successful snapshot remains available until its configured `stale_after`
 duration expires; expired business samples are then omitted. Exporter
 self-metrics remain available throughout the failure.
 
-The current-year Billing history is replaced only after every expected month
+The rolling 12-month Billing history is replaced only after every expected month
 has been collected successfully. If one historical month fails, the exporter
 still updates the compatible latest-finalized metric when possible, retains
-the previous complete annual snapshot, and retries only missing months on the
+the previous complete rolling snapshot, and retries only missing months on the
 next run.
 
 When Qiniu supplies a source timestamp, freshness is based on the older of the

@@ -15,7 +15,9 @@ The exporter is implemented in Go with background polling and in-memory snapshot
 - Kodo, CDN, and billing use independent pollers, limiters, credential references, and cached snapshots. Each module can be enabled or disabled independently.
 - `/metrics` does not access the Qiniu APIs; it only reads immutable snapshots. When an upstream request fails, retain the last successful values within the staleness period allowed for that dataset while exposing collection failure and freshness. Stop exporting the business snapshot after that period expires.
 - Export capacity, cost, historical time-bucket request counts, and historical time-bucket traffic returned by Qiniu as Gauges. Only exporter-owned cumulative event metrics use Counters.
-- The MVP does not collect high-cardinality or sensitive dimensions such as object keys, URLs, IP addresses, order numbers, or bill IDs.
+- The MVP does not collect unbounded dimensions such as object keys, URLs,
+  order numbers, or bill IDs. The only client-address exception is the two
+  current-day CDN Top-IP metric families, each capped at ten active series.
 - The public CDN and Kodo statistics APIs do not provide real-time request latency, and Kodo also does not provide status codes or error rates. Use Blackbox Exporter, application metrics, or a phase-two log pipeline to fill these SLI gaps.
 
 ### 1.1 Monitoring-only Boundary
@@ -34,12 +36,14 @@ Recommended technical baseline: Go 1.23+ (the minimum version supported by the c
 - The default Prometheus scrape interval is 30 seconds. It reads cached snapshots and is independent of Qiniu upstream collection intervals.
 - Kodo bucket/region and CDN-domain discovery is scheduled immediately after startup and refreshed every hour by default. An initial failure leaves an empty inventory without blocking HTTP readiness; a later failed refresh retains the previous complete inventory. A successful refresh atomically adds and removes resources. Inventory and statistics catalogs use the same last-good resource set; discovery health and last-success age expose staleness.
 - The billing timezone is fixed to `Asia/Shanghai`. The timezones of Kodo and CDN time fields must be confirmed with a real account during the PoC. Until confirmed, the `statistics_timezone_verified=false` runtime gate for each module prevents statistics calls and publication; read-only resource discovery still runs.
-- The exporter only needs current state, the latest complete time bucket, the current-month estimate, the most recently finalized month, and a bounded current-year view of finalized monthly totals. It is not a historical ledger or reporting system.
+- The exporter only needs current state, the latest complete time bucket, the current-month estimate, the most recently finalized month, and a bounded rolling 12-month view of finalized monthly totals. It is not a historical ledger or reporting system.
 
 ### 2.2 Not Included in the Initial Release
 
 - Do not call write APIs that create, modify, delete, refresh, prefetch, or cancel orders.
-- Do not put Top URLs, Top IPs, object keys, client IPs, User-Agent values, or Referer values into Prometheus.
+- Do not put Top URLs, object keys, User-Agent values, or Referer values into
+  Prometheus. Client IPs are allowed only in the explicitly bounded current-day
+  CDN Top-IP metrics and require the same restricted access as CDN logs.
 - Do not persist 24 months of billing details or use `month=YYYY-MM` as a continuously growing label.
 - Do not perform synthetic Kodo PUT/DELETE probes with write side effects inside the exporter.
 - Do not download or parse access logs in the main exporter. If needed later, build this as a separate log pipeline.
@@ -186,6 +190,8 @@ Qiniu's CDN APIs use two hosts and two authentication schemes. The exporter call
 | P0 | Request volume | `POST /v2/tune/loganalyze/reqcount` | `domains` is an array; 5min/1hour/1day |
 | P0 | Status codes | `POST /v2/tune/loganalyze/statuscode` | Returns `codes[statusCode]` time series; preserve response keys and confirm their granularity during the PoC |
 | P0 | Cache hits | `POST /v2/tune/loganalyze/hitmiss` | Returns hit/miss counts and hit/miss traffic; the exporter calculates ratios |
+| P0 | Top client IP traffic | `POST /v2/tune/loganalyze/toptrafficip` | Current-day Top 100 per request; query at most 100 domains per batch and merge identical IPs before retaining the account Top 10 |
+| P0 | Top client IP requests | `POST /v2/tune/loganalyze/topcountip` | Same batched, approximate account-level merge as Top client IP traffic |
 
 CDN usage APIs accept at most 50 domains per request and preserve the domain dimension in responses, so they can be batched. Although analytics APIs accept up to 100 domains, their response structures do not include a domain dimension. To emit per-domain metrics, the MVP queries only one domain at a time. This aggregation behavior is a mandatory PoC check.
 
@@ -202,9 +208,12 @@ Domains come exclusively from a complete successful discovery result and are sor
 | `qiniu_cdn_usage_traffic_bytes` | Gauge | `domain,period` | Per-domain traffic for `last_complete_hour`, `today`, or `current_month`; period Gauge resets are expected |
 | `qiniu_cdn_usage_peak_bandwidth_bits_per_second` | Gauge | `domain,period` | Per-domain five-minute peak for `last_complete_hour`, `today`, or `current_month` |
 | `qiniu_cdn_usage_account_traffic_bytes` | Gauge | `period` | Traffic summed across every active domain in the complete discovered account scope for the same three periods |
+| `qiniu_cdn_usage_account_daily_traffic_bytes` | Gauge | `date` | Daily all-domain traffic for each date in the current month; completed dates use day-metering buckets and today uses complete five-minute monitoring buckets |
 | `qiniu_cdn_usage_account_peak_bandwidth_bits_per_second` | Gauge | `period` | Complete-scope account peak calculated by summing all active domains at each aligned five-minute point before selecting the maximum; never sum per-domain peaks |
 | `qiniu_cdn_usage_active_domains` | Gauge | `period` | Domains with non-zero traffic in the reporting period |
 | `qiniu_cdn_usage_complete` | Gauge | `period` | 1 when the period includes every active domain in the latest discovery scope, otherwise 0; incomplete account totals are omitted |
+| `qiniu_cdn_top_client_ip_traffic_bytes` | Gauge | `ip,rank,period` | Approximate current-day client IP traffic Top 10 across all active domains; `period=today` |
+| `qiniu_cdn_top_client_ip_requests` | Gauge | `ip,rank,period` | Approximate current-day client IP request Top 10 across all active domains; `period=today` |
 | `qiniu_cdn_requests_per_second` | Gauge | `domain,region` | Average RPS in the latest complete `reqcount` bucket |
 | `qiniu_cdn_http_responses_per_second` | Gauge | `domain,region,code` | Average response rate by status code; preserve the validated `code` value returned by the API without assuming that it is necessarily a category or an exact code |
 | `qiniu_cdn_cache_requests_per_second` | Gauge | `domain,result` | Hit/miss request count divided by bucket duration in seconds; `result` is `hit`/`miss` |
@@ -220,7 +229,9 @@ The public analytics APIs do not provide real-time response latency. CDN access 
 
 - Real-time domain availability and DNS/TLS/HTTP latency: Blackbox Exporter.
 - Historical Qiniu-side P50/P95/P99: asynchronously parse completed hourly CDN logs in phase two.
-- Top URLs/IPs: send only to logging/reporting systems, not Prometheus.
+- Top URLs and full client-IP histories: send only to logging/reporting systems,
+  not Prometheus. The exporter retains only the current Top 10 traffic and
+  request snapshots; Prometheus retention still records label churn over time.
 
 ## 7. Billing
 
@@ -246,6 +257,7 @@ Money fields are fixed-point integers with eight decimal places and must be divi
 | `qiniu_billing_available_balance` | Gauge | `currency` | Current available balance in the currency's major unit |
 | `qiniu_billing_unpaid_amount` | Gauge | `currency` | Current unpaid amount |
 | `qiniu_billing_estimated_cost` | Gauge | `currency` | Cumulative estimated cost for the period represented by `bill/snapshot.total_money`; do not assert that it is MTD |
+| `qiniu_billing_estimated_daily_cost` | Gauge | `currency,date` | Next-day estimated cost increment derived from adjacent cumulative snapshots; the exporter backfills only the current month and Prometheus supplies prior retained dates |
 | `qiniu_billing_estimate_period_start_timestamp_seconds` | Gauge | None | Start of the period covered by the daily estimate |
 | `qiniu_billing_estimate_period_end_timestamp_seconds` | Gauge | None | End of the period covered by the daily estimate (exclusive) |
 | `qiniu_billing_resource_pack_records` | Gauge | None | Number of resource-pack monthly-overview records in the complete paginated result; 0 may be used for absence alerts |
@@ -255,18 +267,19 @@ Money fields are fixed-point integers with eight decimal places and must be divi
 | `qiniu_billing_resource_pack_remaining_ratio` | Gauge | `item,zone,available_time,unit` | `month_remain / total_surplus`, range 0-1; absent when there are no records |
 | `qiniu_billing_last_finalized_cost` | Gauge | `currency` | Total cost for the most recently fully finalized month |
 | `qiniu_billing_last_finalized_period_start_timestamp_seconds` | Gauge | None | Start of the most recently finalized month |
-| `qiniu_billing_current_year_monthly_finalized_cost` | Gauge | `currency,month` | Finalized monthly total in the current Asia/Shanghai calendar year; `month` is one of the fixed values `01`–`12` |
+| `qiniu_billing_last_12_months_finalized_cost` | Gauge | `currency,month` | Finalized total for each of the latest twelve Asia/Shanghai billing months; `month` is a bounded `YYYY-MM` value |
+| `qiniu_billing_finalized_daily_cost` | Gauge | `currency,date` | Finalized cost from exact one-day v2 bill-detail rows; monthly-billed rows are excluded rather than allocated artificially |
 
-A snapshot queried on the first day of a month represents the entire previous month, not current-month MTD. The estimate metric therefore uses a neutral name and exposes period start/end separately. Do not use `bill_id`, `order_hash`, `po_id`, email, `YYYY-MM` values, or any cost-allocation label as a label. The current-year metric uses only the fixed two-digit month-of-year label and is atomically replaced at the year boundary.
+A snapshot queried on the first day of a month represents the entire previous month, not current-month MTD. The estimate metric therefore uses a neutral name and exposes period start/end separately. Do not use `bill_id`, `order_hash`, `po_id`, email, or any cost-allocation label as a label. The rolling finalized metric uses at most twelve `YYYY-MM` values and atomically replaces the oldest month.
 
 The finalized-bill job uses the same single-month `bill/detail` endpoint for
-the latest-month compatibility metrics and the current-year view. The first
-run backfills only finalized months in the current year (at most 11 distinct
-monthly client operations), caching every successful immutable month in
+the latest-month compatibility metrics and the rolling 12-month view. The first
+run backfills the latest twelve finalized months (12 distinct monthly client
+operations), caching every successful immutable month in
 memory. Each operation may make up to three bounded HTTP attempts for retryable
 failures, subject to the job deadline and the same layered limiters. Daily runs make no request
 until a new month becomes eligible after the fifth day, then normally make one
-request. A partial backfill never replaces the last complete annual snapshot;
+request. A partial backfill never replaces the last complete rolling snapshot;
 the next run requests only missing months. A process restart intentionally
 rebuilds the bounded cache rather than adding persistent state.
 
@@ -300,12 +313,17 @@ Dataset-level `collector_success` is 1 only when the latest poll succeeded for e
 Permitted business labels:
 
 - Kodo: `bucket`, `region`, `storage_class`, and bounded operation/route enums.
-- CDN: `domain`, `region`, bounded `operating_state`/`product` inventory enums, and format-validated status-code keys returned by the API.
+- CDN: `domain`, `region`, bounded `operating_state`/`product` inventory enums,
+  format-validated status-code keys returned by the API, and canonical IP plus
+  rank only for the two current-day Top-IP metric families.
 - Billing: `currency` and allowlisted `item`, `zone`, `available_time`, and `unit` values.
 
 The resource-pack allowlist contains at most 200 tuples, producing at most about 800 detailed business time series. If more are needed, split the exporter or monitoring scope and evaluate Prometheus cardinality first instead of relaxing the bounded limit. A CDN status-code response must not contain both an aggregate key and an exact key from the same class, such as `5xx` and `500`, because rules could double-count them.
 
-Forbidden labels: AK/SK, UID/email, `account_id`, object key, complete URL, client IP, User-Agent, Referer, CNAME, task ID, order/bill/PO ID, timestamp string, or any uncontrolled bucket tag.
+Forbidden labels: AK/SK, UID/email, `account_id`, object key, complete URL,
+client IP outside the two bounded Top-IP families, User-Agent, Referer, CNAME,
+task ID, order/bill/PO ID, timestamp string outside bounded current-period
+calendar labels, or any uncontrolled bucket tag.
 
 The initial release does not add an `account` label to every metric. Under the one-account-per-process deployment requirement, Prometheus scrape configuration should inject that account's alias as a target label, for example `qiniu_account="production"`. This follows the Prometheus convention that dimensions common to all metrics belong in target labels and avoids duplicated state inside the exporter.
 
@@ -332,6 +350,7 @@ Normal collection requests pass through the attempt-0 limiter and may use at mos
 - Kodo `/v6/*` responses are not grouped by bucket, so per-bucket metrics necessarily fan out. Query only the successfully discovered inventory and storage classes that are actually enabled.
 - Query windows cover only the minimum range required for each result. Latest monitoring covers today plus enough of the preceding hour to tolerate one lagging batch. Current-month traffic reads completed day buckets. Monthly bandwidth cold start may backfill the current month's completed dates, but splits them into at most three-day windows and keeps only compact peak aggregates; later rounds reuse the in-memory completed-day cache. There is only one scheduled task for a given `dataset + resource`; do not issue another request for the same window while the previous run is incomplete.
 - `/metrics` never accesses upstream services. Poll Kodo/CDN, balance, and daily/finalized billing data on their documented schedules. Successful snapshots survive failed rounds and remain exportable only until their configured `stale_after` duration expires.
+- Daily estimated billing cost is derived from adjacent current-month snapshots after 08:15 Asia/Shanghai; on the second day of a month the snapshot itself represents day one, while no daily estimate is published from the first-day special prior-month snapshot. Finalized daily cost is summed only from v2 bill-detail rows with an exact one-day interval. Month-span rows remain monthly costs and are never allocated across days by the exporter.
 - Negative-cache invalid `400032` domains until the next successful discovery refresh so they are not retried every round. Continue exposing collection failure for each affected resource.
 
 ### 10.3 Recommended Intervals and Cold Start
@@ -346,7 +365,7 @@ Normal collection requests pass through the attempt-0 limiter and may use at mos
 | Billing balance | 60 minutes | Collect immediately after startup |
 | Billing estimate | Daily at 08:15 | Run at startup when a safe snapshot date exists; on the morning of the first day of each month, wait until 08:15 |
 | Billing resource packs | Daily at 08:16 | Register only when the allowlist is nonempty; run at startup only after 08:15 |
-| Final monthly bill and current-year monthly totals | Daily at 08:30 | Query immediately at startup; select the month before last on days 1-4 and the previous month from day 5 onward; backfill only missing finalized months in the current year, then normally add one month after the fifth day |
+| Final monthly bill and rolling 12-month totals | Daily at 08:30 | Query immediately at startup; select the month before last on days 1-4 and the previous month from day 5 onward; backfill only missing months in the rolling 12-month window, then normally add one month after the fifth day |
 
 After the initial stable phase, fixed-interval tasks add approximately +/-10% random jitter. The official requirement is to query daily estimates after 08:00; the exporter adds a safety margin and starts at 08:15, while resource-pack collection starts at 08:16. The scheduler evaluates startup eligibility at the same instant it calculates the first delay, avoiding a race across 08:15. If any resource-pack page fails, the entire round fails; publish atomically only after all pages succeed.
 
@@ -355,8 +374,8 @@ After the initial stable phase, fixed-interval tasks add approximately +/-10% ra
 Before accepting each refreshed inventory, calculate demand from the discovered resource count and configured intervals. A rejected initial inventory leaves the exporter running with an empty resource set and a failed discovery self-metric; a rejected later refresh retains the previous complete set:
 
 - The conservative Kodo first-attempt demand is `ceil(B/100)/T_discovery + B × (6/T_activity + 2×S/T_capacity)` QPS, where `B` is the discovered bucket count, `S` is the enabled storage-class count, `T_discovery=min(5m, I_discovery/2)`, and each statistics timeout `T` is 80% of its configured interval. The six activity-period calls are four latest-five-minute queries plus two current-month usage queries. Omit the statistics terms until the timezone gate passes, but always budget the paginated discovery calls because they share the Kodo limiter. Reject inventories above 200 buckets.
-- Reject discovery responses containing more than 2,000 CDN product domains. Statistics admission includes `3×A/T_analytics` plus a bounded cold-start worst case of `208×ceil(A/50)/T_monitoring`, where `A` is the `operatingState=success` subset and each `T` is 80% of its interval. The batched bound covers two calls across 16 monitoring-isolation attempts, one completed-traffic call across 16 attempts, and at most ten three-day bandwidth windows with 16 attempts each. Normal cached rounds are far smaller. Every request still passes the shared 5 QPS Fusion limiter. When `monitoring_units_verified=false`, omit the batched term and make no usage calls. Do not send CDN statistics requests until the timezone gate passes; read-only discovery and inventory publication remain enabled.
-- Steady-state billing call volume is low. Balance, daily APIs, current-year finalized-month backfill, and complete pagination remain subject to 1 QPS, burst 1, and concurrency 1. A finalized history cold start uses at most 11 distinct sequential monthly operations; each operation retains the existing maximum of two retries and the one-minute job deadline. Later runs request only missing months. Do not paginate when the resource-pack allowlist is empty.
+- Reject discovery responses containing more than 2,000 CDN product domains. Statistics admission includes `3×A/T_analytics + 2×ceil(A/100)/T_analytics` plus a bounded cold-start worst case of `208×ceil(A/50)/T_monitoring`, where `A` is the `operatingState=success` subset and each `T` is 80% of its interval. The analytics terms cover three per-domain operational queries plus the traffic/request Top-IP calls for each 100-domain batch. The monitoring bound covers two calls across 16 monitoring-isolation attempts, one completed-traffic call across 16 attempts, and at most ten three-day bandwidth windows with 16 attempts each. Normal cached rounds are far smaller. Every request still passes the shared 5 QPS Fusion limiter. When `monitoring_units_verified=false`, omit the monitoring term and make no usage calls. Do not send CDN statistics requests until the timezone gate passes; read-only discovery and inventory publication remain enabled.
+- Steady-state billing call volume is low. Balance, daily APIs, rolling finalized-month backfill, and complete pagination remain subject to 1 QPS, burst 1, and concurrency 1. A finalized history cold start uses 12 distinct sequential monthly operations; each operation retains the existing maximum of two retries and the one-minute job deadline. Later runs request only missing months. Do not paginate when the resource-pack allowlist is empty.
 
 If estimated demand exceeds the configured first-attempt budget, reject that inventory with an explicit discovery error. Resolve this by increasing the corresponding collection interval, reducing enabled storage classes, disabling an unneeded module, or restricting the credential's resource scope. Higher protection ceilings require a reviewed code change and, where applicable, a higher Qiniu quota. Do not scale horizontally with multiple instances for the same account. If multiple instances are unavoidable, use a shared external distributed limiter and keep their aggregate budget within the account quota.
 

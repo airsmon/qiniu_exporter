@@ -146,7 +146,11 @@ func (c *Client) BillDetail(ctx context.Context, period BillingPeriod) (BillDeta
 	if err := data.validate(); err != nil {
 		return BillDetail{}, err
 	}
-	return BillDetail{TotalMoney: *data.TotalMoney, Currency: data.Currency}, nil
+	items, err := data.items(period)
+	if err != nil {
+		return BillDetail{}, err
+	}
+	return BillDetail{TotalMoney: *data.TotalMoney, Currency: data.Currency, Items: items}, nil
 }
 
 func (c *Client) get(ctx context.Context, path string, query url.Values, dst any) error {
@@ -268,6 +272,13 @@ func fixed8OrZero(value *Fixed8) Fixed8 {
 type billSummaryData struct {
 	TotalMoney *Fixed8 `json:"total_money"`
 	Currency   string  `json:"currency"`
+	List       []struct {
+		Start      string  `json:"start"`
+		End        string  `json:"end"`
+		ItemMoney  *Fixed8 `json:"item_money"`
+		Currency   string  `json:"currency"`
+		BillPeriod string  `json:"bill_period"`
+	} `json:"list"`
 }
 
 func (data billSummaryData) validate() error {
@@ -275,4 +286,37 @@ func (data billSummaryData) validate() error {
 		return errors.New("billing: bill response is missing required fields")
 	}
 	return nil
+}
+
+func (data billSummaryData) items(period BillingPeriod) ([]BillItem, error) {
+	if len(data.List) > 10_000 {
+		return nil, errors.New("billing: bill detail exceeds 10000 items")
+	}
+	items := make([]BillItem, 0, len(data.List))
+	for index, raw := range data.List {
+		start, err := parseBillingItemTime(raw.Start)
+		if err != nil {
+			return nil, fmt.Errorf("billing: bill item %d has invalid start", index)
+		}
+		end, err := parseBillingItemTime(raw.End)
+		if err != nil {
+			return nil, fmt.Errorf("billing: bill item %d has invalid end", index)
+		}
+		if raw.ItemMoney == nil || raw.Currency != data.Currency || raw.BillPeriod == "" || start.Before(period.Start) || end.After(period.End) || !end.After(start) {
+			return nil, fmt.Errorf("billing: bill item %d has invalid fields", index)
+		}
+		items = append(items, BillItem{Start: start, End: end, ItemMoney: *raw.ItemMoney, Currency: raw.Currency, BillPeriod: raw.BillPeriod})
+	}
+	return items, nil
+}
+
+func parseBillingItemTime(value string) (time.Time, error) {
+	if parsed, err := time.ParseInLocation("2006-01-02T15:04:05", value, shanghaiLocation); err == nil {
+		return parsed, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return parsed.In(shanghaiLocation), nil
 }

@@ -43,19 +43,12 @@ func SelectPeriods(now time.Time) PeriodSelection {
 	return selection
 }
 
-// CurrentYearFinalizedPeriods returns the finalized months in the current
-// Asia/Shanghai calendar year, oldest first. The current month is never
-// included because Qiniu finalizes a monthly bill after that month ends.
-func CurrentYearFinalizedPeriods(now time.Time) []BillingPeriod {
-	localNow := now.In(shanghaiLocation)
-	yearStart := time.Date(localNow.Year(), time.January, 1, 0, 0, 0, 0, shanghaiLocation)
+// Last12FinalizedPeriods returns the latest twelve months expected to be
+// finalized by Qiniu, oldest first, using the Asia/Shanghai billing cutoff.
+func Last12FinalizedPeriods(now time.Time) []BillingPeriod {
 	latest := SelectPeriods(now).Finalized
-	if latest.Start.Before(yearStart) {
-		return nil
-	}
-
-	periods := make([]BillingPeriod, 0, int(latest.Start.Month()))
-	for start := yearStart; !start.After(latest.Start); start = start.AddDate(0, 1, 0) {
+	periods := make([]BillingPeriod, 0, 12)
+	for start := latest.Start.AddDate(0, -11, 0); !start.After(latest.Start); start = start.AddDate(0, 1, 0) {
 		periods = append(periods, BillingPeriod{Start: start, End: start.AddDate(0, 1, 0)})
 	}
 	return periods

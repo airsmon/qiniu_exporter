@@ -51,23 +51,40 @@ three-day windows and cached, then merged with today's complete monitoring
 points. The bandwidth Top 5 panel follows the domains selected by monthly
 traffic, matching the Qiniu overview's table scope.
 
+The two client-IP tables show today's traffic and request Top 10 across every
+active domain in the account. They intentionally ignore the dashboard domain
+selector. Accounts with more than 100 active domains are queried in batches;
+because Qiniu returns only each batch's Top 100, the merged result is explicitly
+presented as approximate.
+
+CDN period traffic cards and the traffic Top 5 panel display fixed GB values
+using `1 GB = 1024^3 bytes`, matching the unit convention used by the Qiniu
+console. Their Prometheus source metrics remain bytes. Today's portion ends at
+the latest complete five-minute bucket and can differ slightly from later
+billing revisions. The all-domain today card and current-month daily traffic
+bars are green through 350 GB, yellow above 350 GB, and red above 750 GB.
+
 Resource-pack quantities include a `unit` label and must not be aggregated
 across different units. The resource-pack status panel distinguishes an empty
 allowlist, an enabled collector with zero records, and unavailable data.
 
 The Billing overview uses four independent instant-query cards for available
 balance, unpaid amount, the current estimate, and the last finalized cost.
+The daily-cost panel keeps the two accounting meanings separate: next-day
+estimated increments and finalized one-day bill items. Monthly-billed finalized
+items are intentionally excluded rather than divided across calendar days. On
+startup the exporter backfills every completed day in the current month, so the
+panel does not begin with only yesterday's single bar.
 Unpaid amount is green at zero and orange at 0.01 or more; the other cards
 avoid inventing account-specific financial thresholds. The `currency` variable
 defaults to the regex All value (`.*`), so older dashboard links containing
 `var-currency=$__all` continue to return data.
 
-The current-year Billing panels consume
-`qiniu_billing_current_year_monthly_finalized_cost`. It is an instant Gauge
-with `currency` and a zero-padded `month="01".."12"` label for finalized months
-in the current `Asia/Shanghai` calendar year. A horizontal monthly bar gauge,
-YTD total, monthly average, and finalized-month count exclude the current-period
-estimate.
+The rolling monthly panel consumes
+`qiniu_billing_last_12_months_finalized_cost`. It is an instant Gauge with
+`currency` and a bounded `month="YYYY-MM"` label. The vertical bar gauge shows
+the latest twelve finalized Asia/Shanghai billing months and excludes the
+current-period estimate.
 
 ## Provisioning
 

@@ -108,6 +108,26 @@ spec:
             summary: "Qiniu CDN cache hit ratio is low"
             description: {{ "{{ $labels.domain }} request hit ratio is below 80%; tune this threshold for the workload." | quote }}
 
+        # The matching Alertmanager route should use group_wait=30s and
+        # repeat_interval=5m with a dedicated receiver whose send_resolved is
+        # false. The 11-minute firing window then permits at most three
+        # notifications and prevents repeats for the rest of the day.
+        - alert: QiniuCDNDailyTrafficHigh
+          expr: |
+            (
+              qiniu_cdn_usage_account_traffic_bytes{period="today"} > 322122547200
+            )
+            and
+            (
+              qiniu_cdn_usage_account_traffic_bytes{period="today"} offset 11m <= 322122547200
+            )
+          labels:
+            {{- include "qiniu-exporter.alertLabels" (dict "root" . "severity" "warning") | nindent 12 }}
+            notification_policy: three_times
+          annotations:
+            summary: "Qiniu CDN daily all-domain traffic exceeded 300 GiB"
+            description: "Current-day all-domain traffic crossed 300 GiB; this alert has an 11-minute notification window."
+
         - record: qiniu_kodo_storage_growth_bytes_per_second
           expr: deriv(qiniu_kodo_storage_bytes[6h])
     {{- end }}

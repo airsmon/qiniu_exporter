@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -13,6 +14,8 @@ const (
 	CDNUsagePeriodToday            = "today"
 	CDNUsagePeriodCurrentMonth     = "current_month"
 )
+
+var cdnCollectorLocation = time.FixedZone("Asia/Shanghai", 8*60*60)
 
 type CDNMonitoringSnapshot struct {
 	Bandwidth []cdn.BandwidthSample
@@ -38,7 +41,19 @@ type CDNUsagePeriodSnapshot struct {
 }
 
 type CDNUsageSnapshot struct {
-	Periods []CDNUsagePeriodSnapshot
+	Periods      []CDNUsagePeriodSnapshot
+	DailyTraffic []CDNDailyTrafficSnapshot
+}
+
+type CDNDailyTrafficSnapshot struct {
+	Date  string
+	Bytes float64
+}
+
+type CDNTopIPSnapshot struct {
+	Date     string
+	Traffic  []cdn.TopIPValue
+	Requests []cdn.TopIPValue
 }
 
 type CDNStores struct {
@@ -46,27 +61,31 @@ type CDNStores struct {
 	Monitoring *snapshot.ResourceStore[CDNMonitoringSnapshot]
 	Analytics  *snapshot.ResourceStore[CDNAnalyticsSnapshot]
 	Usage      *snapshot.Store[CDNUsageSnapshot]
+	TopIPs     *snapshot.Store[CDNTopIPSnapshot]
 }
 
 type CDNCollector struct {
 	stores CDNStores
 
-	domains          *prometheus.Desc
-	domainInfo       *prometheus.Desc
-	bandwidth        *prometheus.Desc
-	traffic          *prometheus.Desc
-	requests         *prometheus.Desc
-	httpResponses    *prometheus.Desc
-	cacheRequests    *prometheus.Desc
-	cacheTraffic     *prometheus.Desc
-	cacheHitRatio    *prometheus.Desc
-	trafficHitRatio  *prometheus.Desc
-	usageTraffic     *prometheus.Desc
-	usageBandwidth   *prometheus.Desc
-	accountTraffic   *prometheus.Desc
-	accountBandwidth *prometheus.Desc
-	activeDomains    *prometheus.Desc
-	usageComplete    *prometheus.Desc
+	domains             *prometheus.Desc
+	domainInfo          *prometheus.Desc
+	bandwidth           *prometheus.Desc
+	traffic             *prometheus.Desc
+	requests            *prometheus.Desc
+	httpResponses       *prometheus.Desc
+	cacheRequests       *prometheus.Desc
+	cacheTraffic        *prometheus.Desc
+	cacheHitRatio       *prometheus.Desc
+	trafficHitRatio     *prometheus.Desc
+	usageTraffic        *prometheus.Desc
+	usageBandwidth      *prometheus.Desc
+	accountTraffic      *prometheus.Desc
+	accountDailyTraffic *prometheus.Desc
+	accountBandwidth    *prometheus.Desc
+	activeDomains       *prometheus.Desc
+	usageComplete       *prometheus.Desc
+	topIPTraffic        *prometheus.Desc
+	topIPRequests       *prometheus.Desc
 }
 
 func NewCDN(stores CDNStores) *CDNCollector {
@@ -137,6 +156,11 @@ func NewCDN(stores CDNStores) *CDNCollector {
 			"Qiniu CDN traffic bytes across the complete active discovered domain scope in a current reporting period; this Gauge resets at the natural period boundary.",
 			[]string{"period"}, nil,
 		),
+		accountDailyTraffic: prometheus.NewDesc(
+			"qiniu_cdn_usage_account_daily_traffic_bytes",
+			"Daily Qiniu CDN traffic bytes across the complete active discovered domain scope for the current month.",
+			[]string{"date"}, nil,
+		),
 		accountBandwidth: prometheus.NewDesc(
 			"qiniu_cdn_usage_account_peak_bandwidth_bits_per_second",
 			"Peak Qiniu CDN bandwidth across the complete active discovered domain scope, calculated by summing aligned points before selecting the peak.",
@@ -151,6 +175,16 @@ func NewCDN(stores CDNStores) *CDNCollector {
 			"qiniu_cdn_usage_complete",
 			"Whether the usage period includes every active CDN domain discovered for the account.",
 			[]string{"period"}, nil,
+		),
+		topIPTraffic: prometheus.NewDesc(
+			"qiniu_cdn_top_client_ip_traffic_bytes",
+			"Approximate current-day client IP traffic Top 10 merged across Qiniu Top-100 domain batches.",
+			[]string{"ip", "rank", "period"}, nil,
+		),
+		topIPRequests: prometheus.NewDesc(
+			"qiniu_cdn_top_client_ip_requests",
+			"Approximate current-day client IP request Top 10 merged across Qiniu Top-100 domain batches.",
+			[]string{"ip", "rank", "period"}, nil,
 		),
 	}
 }
@@ -169,13 +203,26 @@ func (c *CDNCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.usageTraffic
 	ch <- c.usageBandwidth
 	ch <- c.accountTraffic
+	ch <- c.accountDailyTraffic
 	ch <- c.accountBandwidth
 	ch <- c.activeDomains
 	ch <- c.usageComplete
+	ch <- c.topIPTraffic
+	ch <- c.topIPRequests
 }
 
 func (c *CDNCollector) Collect(ch chan<- prometheus.Metric) {
 	now := time.Now()
+	if c.stores.TopIPs != nil {
+		if topIPs, _, ok := c.stores.TopIPs.Load(now); ok && topIPs.Date == now.In(cdnCollectorLocation).Format("2006-01-02") {
+			for index, sample := range topIPs.Traffic {
+				ch <- prometheus.MustNewConstMetric(c.topIPTraffic, prometheus.GaugeValue, sample.Value, sample.IP, strconv.Itoa(index+1), CDNUsagePeriodToday)
+			}
+			for index, sample := range topIPs.Requests {
+				ch <- prometheus.MustNewConstMetric(c.topIPRequests, prometheus.GaugeValue, sample.Value, sample.IP, strconv.Itoa(index+1), CDNUsagePeriodToday)
+			}
+		}
+	}
 	if domains, _, ok := c.stores.Inventory.Load(now); ok {
 		ch <- prometheus.MustNewConstMetric(c.domains, prometheus.GaugeValue, float64(len(domains)))
 		for _, domain := range domains {
@@ -212,6 +259,9 @@ func (c *CDNCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 	if usage, _, ok := c.stores.Usage.Load(now); ok {
+		for _, day := range usage.DailyTraffic {
+			ch <- prometheus.MustNewConstMetric(c.accountDailyTraffic, prometheus.GaugeValue, day.Bytes, day.Date)
+		}
 		for _, period := range usage.Periods {
 			active := 0
 			for _, domain := range period.Traffic.Domains {

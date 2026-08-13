@@ -113,6 +113,9 @@ func TestBillDetail(t *testing.T) {
 	if got.TotalMoney != 538323000000 || got.Currency != "CNY" {
 		t.Fatalf("BillDetail() = %+v", got)
 	}
+	if len(got.Items) != 2 || got.Items[0].Start.Day() != 3 || got.Items[0].ItemMoney != 120000000 || got.Items[1].End.Month() != time.August {
+		t.Fatalf("BillDetail().Items = %+v", got.Items)
+	}
 }
 
 func TestBillDetailRejectsNonMonthlyPeriodBeforeRequest(t *testing.T) {

@@ -19,8 +19,8 @@ func TestFinalizedHistoryCacheBackfillsOnceAndThenAddsOneMonth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.CurrentYearComplete || len(got.CurrentYear.Months) != 6 || len(client.calls) != 6 {
-		t.Fatalf("first collection: complete=%t months=%d calls=%d, want true/6/6", got.CurrentYearComplete, len(got.CurrentYear.Months), len(client.calls))
+	if !got.Last12Complete || len(got.Last12.Months) != 12 || len(client.calls) != 12 {
+		t.Fatalf("first collection: complete=%t months=%d calls=%d, want true/12/12", got.Last12Complete, len(got.Last12.Months), len(client.calls))
 	}
 	if monthKey(got.Latest.Period) != "2026-06" {
 		t.Fatalf("latest finalized month = %s, want 2026-06", monthKey(got.Latest.Period))
@@ -29,8 +29,8 @@ func TestFinalizedHistoryCacheBackfillsOnceAndThenAddsOneMonth(t *testing.T) {
 	if _, err := cache.collect(context.Background(), client, beforeCutoff); err != nil {
 		t.Fatal(err)
 	}
-	if len(client.calls) != 6 {
-		t.Fatalf("unchanged period made %d calls, want 6", len(client.calls))
+	if len(client.calls) != 12 {
+		t.Fatalf("unchanged period made %d calls, want 12", len(client.calls))
 	}
 
 	afterCutoff := shanghaiTestTime(2026, time.August, 5, 8, 30)
@@ -38,8 +38,8 @@ func TestFinalizedHistoryCacheBackfillsOnceAndThenAddsOneMonth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.CurrentYearComplete || len(got.CurrentYear.Months) != 7 || len(client.calls) != 7 {
-		t.Fatalf("incremental collection: complete=%t months=%d calls=%d, want true/7/7", got.CurrentYearComplete, len(got.CurrentYear.Months), len(client.calls))
+	if !got.Last12Complete || len(got.Last12.Months) != 12 || len(client.calls) != 13 {
+		t.Fatalf("incremental collection: complete=%t months=%d calls=%d, want true/12/13", got.Last12Complete, len(got.Last12.Months), len(client.calls))
 	}
 	if gotMonth := monthKey(client.calls[len(client.calls)-1]); gotMonth != "2026-07" {
 		t.Fatalf("incremental request month = %s, want 2026-07", gotMonth)
@@ -60,8 +60,8 @@ func TestFinalizedHistoryCacheRetriesOnlyMissingMonths(t *testing.T) {
 	if err == nil {
 		t.Fatal("first collection unexpectedly succeeded")
 	}
-	if partial.CurrentYearComplete {
-		t.Fatal("partial current-year history was marked complete")
+	if partial.Last12Complete {
+		t.Fatal("partial last-12-month history was marked complete")
 	}
 	if monthKey(partial.Latest.Period) != "2026-06" {
 		t.Fatalf("latest month was not retained during history failure: %#v", partial.Latest)
@@ -72,16 +72,16 @@ func TestFinalizedHistoryCacheRetriesOnlyMissingMonths(t *testing.T) {
 	if got := client.counts["2026-02"]; got != 1 {
 		t.Fatalf("February calls after failure = %d, want 1", got)
 	}
-	if _, exists := cache.months["2025-12"]; exists {
-		t.Fatal("partial current-year failure retained a prior-year cache entry")
+	if _, exists := cache.months["2025-12"]; !exists {
+		t.Fatal("partial last-12-month failure dropped an in-range prior-year cache entry")
 	}
 
 	result, err := cache.collect(context.Background(), client, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.CurrentYearComplete || len(result.CurrentYear.Months) != 6 {
-		t.Fatalf("recovered result: complete=%t month count=%d, want true/6", result.CurrentYearComplete, len(result.CurrentYear.Months))
+	if !result.Last12Complete || len(result.Last12.Months) != 12 {
+		t.Fatalf("recovered result: complete=%t month count=%d, want true/12", result.Last12Complete, len(result.Last12.Months))
 	}
 	if got := client.counts["2026-01"]; got != 1 {
 		t.Fatalf("January was fetched again: calls=%d", got)
@@ -94,7 +94,7 @@ func TestFinalizedHistoryCacheRetriesOnlyMissingMonths(t *testing.T) {
 	}
 }
 
-func TestFinalizedHistoryCacheDropsPriorYearFromCurrentYearSeries(t *testing.T) {
+func TestFinalizedHistoryCacheKeepsRollingWindowAcrossYearBoundary(t *testing.T) {
 	client := &fakeBillDetailClient{}
 	cache := &finalizedHistoryCache{}
 
@@ -106,8 +106,8 @@ func TestFinalizedHistoryCacheDropsPriorYearFromCurrentYearSeries(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.CurrentYearComplete || len(result.CurrentYear.Months) != 0 {
-		t.Fatalf("new-year result: complete=%t current months=%d, want true/0", result.CurrentYearComplete, len(result.CurrentYear.Months))
+	if !result.Last12Complete || len(result.Last12.Months) != 12 {
+		t.Fatalf("new-year result: complete=%t months=%d, want true/12", result.Last12Complete, len(result.Last12.Months))
 	}
 	if monthKey(result.Latest.Period) != "2026-11" {
 		t.Fatalf("latest finalized period = %s, want 2026-11", monthKey(result.Latest.Period))
@@ -115,6 +115,39 @@ func TestFinalizedHistoryCacheDropsPriorYearFromCurrentYearSeries(t *testing.T) 
 	if len(client.calls) != callCount {
 		t.Fatalf("new-year cache reuse made %d extra calls, want 0", len(client.calls)-callCount)
 	}
+}
+
+func TestCollectDailyEstimatesBackfillsMonthAndReusesCache(t *testing.T) {
+	date := shanghaiTestTime(2026, time.August, 13, 0, 0)
+	client := &fakeBillSnapshotClient{}
+	cache := map[string]billing.BillSnapshot{
+		"2026-08-13": {TotalMoney: 1_200_000_000, Currency: "CNY"},
+	}
+	got, err := collectDailyEstimates(context.Background(), client, date, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 12 || len(client.calls) != 11 || got[0].Date.Day() != 1 || got[11].Date.Day() != 12 {
+		t.Fatalf("first backfill: values=%d calls=%d first=%v last=%v", len(got), len(client.calls), got[0].Date, got[11].Date)
+	}
+	for _, value := range got {
+		if value.Cost != 100_000_000 || value.Currency != "CNY" {
+			t.Fatalf("daily estimate = %#v, want 1 CNY", value)
+		}
+	}
+	if _, err := collectDailyEstimates(context.Background(), client, date, cache); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.calls) != 11 {
+		t.Fatalf("cached backfill made %d calls, want 11", len(client.calls))
+	}
+}
+
+type fakeBillSnapshotClient struct{ calls []time.Time }
+
+func (client *fakeBillSnapshotClient) BillSnapshot(_ context.Context, date time.Time) (billing.BillSnapshot, error) {
+	client.calls = append(client.calls, date)
+	return billing.BillSnapshot{TotalMoney: billing.Fixed8(date.Day()-1) * 100_000_000, Currency: "CNY"}, nil
 }
 
 type fakeBillDetailClient struct {

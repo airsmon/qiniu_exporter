@@ -304,8 +304,20 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 	for _, id := range []int{47, 49, 51} {
 		panel := panelByID(id)
 		query := panel.Targets[0].Expression
-		if !strings.Contains(query, "qiniu_cdn_usage_account_traffic_bytes") || strings.Contains(query, "domain=~") || string(panel.FieldConfig.Defaults["unit"]) != `"decbytes"` {
-			t.Fatalf("CDN account traffic card %d must be a complete, all-domain decimal-byte total: %#v", id, panel)
+		if !strings.Contains(query, "qiniu_cdn_usage_account_traffic_bytes") || strings.Contains(query, "domain=~") || !strings.Contains(query, "/ 1073741824") || string(panel.FieldConfig.Defaults["unit"]) != `"suffix: GB"` {
+			t.Fatalf("CDN account traffic card %d must be a complete, all-domain 1024-based GB total: %#v", id, panel)
+		}
+	}
+	dailyTraffic := panelByID(61)
+	if dailyTraffic.Type != "bargauge" || dailyTraffic.GridPos["y"] != 59 || dailyTraffic.GridPos["h"] != 8 || dailyTraffic.GridPos["w"] != 24 || len(dailyTraffic.Targets) != 1 || !dailyTraffic.Targets[0].Instant || !strings.Contains(dailyTraffic.Targets[0].Expression, "qiniu_cdn_usage_account_daily_traffic_bytes") || strings.Contains(dailyTraffic.Targets[0].Expression, "domain=~") || !strings.Contains(dailyTraffic.Targets[0].Expression, "/ 1073741824") || string(dailyTraffic.FieldConfig.Defaults["unit"]) != `"suffix: GB"` {
+		t.Fatalf("CDN daily all-domain traffic panel is invalid: %#v", dailyTraffic)
+	}
+	for _, id := range []int{49, 61} {
+		panel := panelByID(id)
+		color := strings.ReplaceAll(string(panel.FieldConfig.Defaults["color"]), " ", "")
+		thresholds := strings.ReplaceAll(string(panel.FieldConfig.Defaults["thresholds"]), " ", "")
+		if color != `{"mode":"thresholds"}` || !strings.Contains(thresholds, `"color":"yellow","value":350`) || !strings.Contains(thresholds, `"color":"red","value":750`) {
+			t.Fatalf("CDN daily traffic panel %d has invalid thresholds: %s", id, thresholds)
 		}
 	}
 	for _, id := range []int{48, 50, 55} {
@@ -323,16 +335,33 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 		54: "qiniu_cdn_usage_peak_bandwidth_bits_per_second",
 	} {
 		panel := panelByID(id)
-		if panel.Type != "bargauge" || panel.GridPos["y"] != 67 || panel.GridPos["h"] != 8 || panel.GridPos["w"] != 12 || len(panel.Targets) != 1 || !panel.Targets[0].Instant || !strings.Contains(panel.Targets[0].Expression, "topk(5") || !strings.Contains(panel.Targets[0].Expression, token) || !strings.Contains(panel.Targets[0].Expression, "qiniu_cdn_usage_complete") {
+		if panel.Type != "bargauge" || panel.GridPos["y"] != 75 || panel.GridPos["h"] != 8 || panel.GridPos["w"] != 12 || len(panel.Targets) != 1 || !panel.Targets[0].Instant || !strings.Contains(panel.Targets[0].Expression, "topk(5") || !strings.Contains(panel.Targets[0].Expression, token) || !strings.Contains(panel.Targets[0].Expression, "qiniu_cdn_usage_complete") {
 			t.Fatalf("CDN Top 5 panel %d is invalid: %#v", id, panel)
 		}
+	}
+	if panel := panelByID(53); !strings.Contains(panel.Targets[0].Expression, "/ 1073741824") || string(panel.FieldConfig.Defaults["unit"]) != `"suffix: GB"` {
+		t.Fatalf("CDN traffic Top 5 must use the same 1024-based GB display convention: %#v", panel)
 	}
 	if target := panelByID(54).Targets[0].Expression; !strings.Contains(target, `period="current_month"`) || !strings.Contains(target, "and on (qiniu_account, domain)") {
 		t.Fatalf("monthly bandwidth panel is not aligned to the monthly traffic Top 5: %s", target)
 	}
+	for id, metric := range map[int]string{
+		57: "qiniu_cdn_top_client_ip_traffic_bytes",
+		58: "qiniu_cdn_top_client_ip_requests",
+	} {
+		panel := panelByID(id)
+		transformations := string(panel.Transformations)
+		overrides := string(panel.FieldConfig.Overrides)
+		if panel.Type != "table" || panel.GridPos["y"] != 107 || panel.GridPos["h"] != 8 || panel.GridPos["w"] != 12 || len(panel.Targets) != 1 || !panel.Targets[0].Instant || !strings.Contains(panel.Targets[0].Expression, metric) || strings.Contains(panel.Targets[0].Expression, "domain=~") || !strings.Contains(panel.Description, "approximate") || !strings.Contains(transformations, `"rank": 0`) || !strings.Contains(transformations, `"rank": "Rank"`) || !strings.Contains(overrides, `"options": "Rank"`) || !strings.Contains(overrides, `"value": "none"`) {
+			t.Fatalf("CDN account Top IP table %d is invalid: %#v", id, panel)
+		}
+	}
+	if panel := panelByID(57); !strings.Contains(panel.Targets[0].Expression, "/ 1073741824") || string(panel.FieldConfig.Defaults["unit"]) != `"suffix: GB"` {
+		t.Fatalf("CDN Top IP traffic table must use fixed 1024-based GB: %#v", panel)
+	}
 	for _, id := range []int{21, 22} {
 		panel := panelByID(id)
-		if panel.GridPos["y"] != 59 || !strings.Contains(panel.Targets[0].Expression, "sum by (qiniu_account, region)") || !strings.Contains(panel.Targets[0].Expression, "max by (qiniu_account, domain, region)") || !strings.Contains(panel.Targets[0].Expression, "${cdn_region:regex}") {
+		if panel.GridPos["y"] != 67 || !strings.Contains(panel.Targets[0].Expression, "sum by (qiniu_account, region)") || !strings.Contains(panel.Targets[0].Expression, "max by (qiniu_account, domain, region)") || !strings.Contains(panel.Targets[0].Expression, "${cdn_region:regex}") {
 			t.Fatalf("CDN monitoring overview panel %d is not aggregated by selected domain scope: %#v", id, panel)
 		}
 	}
@@ -343,7 +372,7 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 		46: "qiniu_billing_last_finalized_cost",
 	} {
 		card := panelByID(id)
-		if card.Type != "stat" || card.GridPos["y"] != 100 || card.GridPos["h"] != 5 || card.GridPos["w"] != 6 || len(card.Targets) != 1 {
+		if card.Type != "stat" || card.GridPos["y"] != 116 || card.GridPos["h"] != 5 || card.GridPos["w"] != 6 || len(card.Targets) != 1 {
 			t.Fatalf("Billing KPI card %d is invalid: %#v", id, card)
 		}
 		target := card.Targets[0]
@@ -358,16 +387,20 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 		t.Fatal("Unpaid Amount must distinguish zero from positive debt")
 	}
 	monthly := panelByID(37)
-	if monthly.Type != "bargauge" || monthly.GridPos["y"] != 105 || monthly.GridPos["w"] != 24 || len(monthly.Targets) != 1 || !monthly.Targets[0].Instant || !strings.Contains(monthly.Targets[0].Expression, "qiniu_billing_current_year_monthly_finalized_cost") {
-		t.Fatalf("current-year monthly Billing panel is invalid: %#v", monthly)
+	if monthly.Type != "bargauge" || monthly.Title != "Last 12 Months Finalized Cost" || monthly.GridPos["y"] != 121 || monthly.GridPos["w"] != 24 || len(monthly.Targets) != 1 || !monthly.Targets[0].Instant || !strings.Contains(monthly.Targets[0].Expression, "qiniu_billing_last_12_months_finalized_cost") || string(monthly.Options["orientation"]) != `"vertical"` {
+		t.Fatalf("last-12-month Billing panel is invalid: %#v", monthly)
 	}
-	summary := panelByID(38)
-	if summary.GridPos["y"] != 113 || summary.GridPos["w"] != 24 || summary.GridPos["h"] != 5 || len(summary.Targets) != 3 {
-		t.Fatalf("current-year Billing summary target count = %d, want 3", len(summary.Targets))
+	daily := panelByID(38)
+	if daily.Title == "Current-Year Billing Summary" || daily.Type != "bargauge" || daily.GridPos["y"] != 129 || daily.GridPos["w"] != 24 || daily.GridPos["h"] != 8 || len(daily.Targets) != 2 || !strings.Contains(daily.Description, "monthly-billed items") || string(daily.Options["orientation"]) != `"vertical"` {
+		t.Fatalf("daily Billing panel is invalid: %#v", daily)
 	}
-	for _, target := range summary.Targets {
-		if !target.Instant || !strings.Contains(target.Expression, "qiniu_billing_current_year_monthly_finalized_cost") {
-			t.Fatalf("invalid current-year Billing summary query: %#v", target)
+	for _, metric := range []string{"qiniu_billing_estimated_daily_cost", "qiniu_billing_finalized_daily_cost"} {
+		found := false
+		for _, target := range daily.Targets {
+			found = found || target.Instant && strings.Contains(target.Expression, metric)
+		}
+		if !found {
+			t.Fatalf("daily Billing panel is missing %s", metric)
 		}
 	}
 	resourcePacks := panelByID(36)
@@ -403,11 +436,21 @@ func TestPrometheusRulesAreValidYAML(t *testing.T) {
 	if len(document.Groups) == 0 || len(document.Groups[0].Rules) == 0 {
 		t.Fatal("rule file is empty")
 	}
+	foundDailyTraffic := false
 	for _, group := range document.Groups {
 		for _, rule := range group.Rules {
 			if rule.Expr == "" || (rule.Alert == "" && rule.Record == "") {
 				t.Fatalf("invalid rule in group %q: %#v", group.Name, rule)
 			}
+			if rule.Alert == "QiniuCDNDailyTrafficHigh" {
+				foundDailyTraffic = true
+				if rule.For != "" || rule.Labels["severity"] != "warning" || rule.Labels["notification_policy"] != "three_times" || !strings.Contains(rule.Expr, "322122547200") || !strings.Contains(rule.Expr, "offset 11m") {
+					t.Fatalf("invalid daily traffic alert: %#v", rule)
+				}
+			}
 		}
+	}
+	if !foundDailyTraffic {
+		t.Fatal("QiniuCDNDailyTrafficHigh rule is missing")
 	}
 }

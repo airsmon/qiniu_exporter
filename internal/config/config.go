@@ -379,6 +379,8 @@ func (c *Config) ValidateCDNResourceCounts(discoveredCount, activeCount int) err
 	utilization := c.Collection.FirstRequestUtilization
 	domains := float64(activeCount)
 	required := 3 * domains / collectionTimeout(c.Collection.Intervals.CDNAnalytics.Value()).Seconds()
+	analyticsBatches := float64((activeCount + 99) / 100)
+	required += 2 * analyticsBatches / collectionTimeout(c.Collection.Intervals.CDNAnalytics.Value()).Seconds()
 	if c.CDN.MonitoringUnitsVerified {
 		batches := float64((activeCount + 49) / 50)
 		// Admission uses the bounded cold-start worst case: monitoring can make

@@ -547,6 +547,9 @@ func TestBuildCDNUsageSnapshotPublishesZeroNewDayAtMidnight(t *testing.T) {
 	if month := usage.Periods[2]; month.Traffic.AccountBytes != 500 {
 		t.Fatalf("current-month traffic=%v, want completed prior day 500", month.Traffic.AccountBytes)
 	}
+	if len(usage.DailyTraffic) != 2 || usage.DailyTraffic[0].Date != "2026-08-01" || usage.DailyTraffic[0].Bytes != 500 || usage.DailyTraffic[1].Date != "2026-08-02" || usage.DailyTraffic[1].Bytes != 0 {
+		t.Fatalf("daily traffic=%#v, want completed August 1 and zero-valued current day", usage.DailyTraffic)
+	}
 }
 
 func TestCDNUsagePeriodsFollowWallClockAcrossMonthRollover(t *testing.T) {
@@ -961,6 +964,57 @@ func TestMergeCDNTrafficUsageCombinesCompletedDaysAndToday(t *testing.T) {
 	}
 }
 
+func TestCollectCDNTopIPsBatchesAndMergesAccountScope(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	domains := make([]string, 101)
+	for index := range domains {
+		domains[index] = fmt.Sprintf("domain-%d.example.com", index)
+	}
+	calls := 0
+	client, err := cdn.NewClient(appDoerFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		var payload struct {
+			Domains []string `json:"domains"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if len(payload.Domains) != 100 && len(payload.Domains) != 1 {
+			t.Fatalf("batch domains=%d", len(payload.Domains))
+		}
+		switch req.URL.Path {
+		case "/v2/tune/loganalyze/toptrafficip":
+			return appJSONResponse(`{"code":200,"error":"","data":{"ips":["192.0.2.1"],"traffic":[100]}}`), nil
+		case "/v2/tune/loganalyze/topcountip":
+			return appJSONResponse(`{"code":200,"error":"","data":{"ips":["192.0.2.1"],"count":[3]}}`), nil
+		default:
+			t.Fatalf("unexpected path %s", req.URL.Path)
+			return nil, nil
+		}
+	}), "https://fusion.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &snapshot.Store[collector.CDNTopIPSnapshot]{}
+	catalog := newResourceCatalog(domains)
+	var scopeMu sync.Mutex
+	if err := collectAndPublishCDNTopIPs(
+		context.Background(), client, domains, catalog, location, time.Hour, store, &scopeMu,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 4 {
+		t.Fatalf("calls=%d, want two endpoints for two batches", calls)
+	}
+	snapshotValue, _, ok := store.Load(time.Now())
+	if !ok || len(snapshotValue.Traffic) != 1 || snapshotValue.Traffic[0].Value != 200 || snapshotValue.Requests[0].Value != 6 {
+		t.Fatalf("snapshot=%#v, ok=%v", snapshotValue, ok)
+	}
+}
+
 func TestUnverifiedMonitoringUnitsMakeNoMonitoringRequest(t *testing.T) {
 	calls := 0
 	client, err := cdn.NewClient(appDoerFunc(func(*http.Request) (*http.Response, error) {
@@ -978,6 +1032,7 @@ func TestUnverifiedMonitoringUnitsMakeNoMonitoringRequest(t *testing.T) {
 		Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
 		Usage:      &snapshot.Store[collector.CDNUsageSnapshot]{},
+		TopIPs:     &snapshot.Store[collector.CDNTopIPSnapshot]{},
 	}
 	cfg := testRealtimeConfig()
 	cfg.CDN.StatisticsTimezoneVerified = true
@@ -1041,6 +1096,7 @@ func TestUnverifiedStatisticsTimezoneMakesNoCDNRequestOrFailureState(t *testing.
 		Monitoring: &snapshot.ResourceStore[collector.CDNMonitoringSnapshot]{},
 		Analytics:  &snapshot.ResourceStore[collector.CDNAnalyticsSnapshot]{},
 		Usage:      &snapshot.Store[collector.CDNUsageSnapshot]{},
+		TopIPs:     &snapshot.Store[collector.CDNTopIPSnapshot]{},
 	}
 	cfg := testRealtimeConfig()
 	cfg.CDN.StatisticsTimezoneVerified = false
