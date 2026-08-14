@@ -74,7 +74,9 @@ The daily-cost panel keeps the two accounting meanings separate: next-day
 estimated increments and finalized one-day bill items. Monthly-billed finalized
 items are intentionally excluded rather than divided across calendar days. On
 startup the exporter backfills every completed day in the current month, so the
-panel does not begin with only yesterday's single bar.
+panel does not begin with only yesterday's single bar. Bar labels use compact
+`MM-DD` names so the date remains visible; the two series remain distinguished
+by color.
 Unpaid amount is green at zero and orange at 0.01 or more; the other cards
 avoid inventing account-specific financial thresholds. The `currency` variable
 defaults to the regex All value (`.*`), so older dashboard links containing

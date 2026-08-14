@@ -58,9 +58,10 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 			} `json:"fieldConfig"`
 			Transformations json.RawMessage `json:"transformations"`
 			Targets         []struct {
-				Expression string `json:"expr"`
-				Instant    bool   `json:"instant"`
-				RefID      string `json:"refId"`
+				Expression   string `json:"expr"`
+				Instant      bool   `json:"instant"`
+				LegendFormat string `json:"legendFormat"`
+				RefID        string `json:"refId"`
 			} `json:"targets"`
 		} `json:"panels"`
 	}
@@ -171,9 +172,10 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 		} `json:"fieldConfig"`
 		Transformations json.RawMessage `json:"transformations"`
 		Targets         []struct {
-			Expression string `json:"expr"`
-			Instant    bool   `json:"instant"`
-			RefID      string `json:"refId"`
+			Expression   string `json:"expr"`
+			Instant      bool   `json:"instant"`
+			LegendFormat string `json:"legendFormat"`
+			RefID        string `json:"refId"`
 		} `json:"targets"`
 	} {
 		for index := range dashboard.Panels {
@@ -401,6 +403,43 @@ func TestGrafanaDashboardHasPanelsAndQueries(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("daily Billing panel is missing %s", metric)
+		}
+	}
+	for _, target := range daily.Targets {
+		if !strings.Contains(target.Expression, "label_replace(") || !strings.Contains(target.Expression, `"day", "$1", "date", "^[0-9]{4}-([0-9]{2}-[0-9]{2})$"`) {
+			t.Fatalf("daily Billing target does not derive an MM-DD display label: %#v", target)
+		}
+		if target.LegendFormat != "{{day}}" {
+			t.Fatalf("daily Billing target %s legend = %q, want an MM-DD-only label", target.RefID, target.LegendFormat)
+		}
+	}
+	var overrides []struct {
+		Matcher struct {
+			ID      string `json:"id"`
+			Options string `json:"options"`
+		} `json:"matcher"`
+		Properties []struct {
+			ID    string `json:"id"`
+			Value struct {
+				FixedColor string `json:"fixedColor"`
+				Mode       string `json:"mode"`
+			} `json:"value"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(daily.FieldConfig.Overrides, &overrides); err != nil {
+		t.Fatal(err)
+	}
+	colors := make(map[string]string, len(overrides))
+	for _, override := range overrides {
+		for _, property := range override.Properties {
+			if override.Matcher.ID == "byFrameRefID" && property.ID == "color" && property.Value.Mode == "fixed" {
+				colors[override.Matcher.Options] = property.Value.FixedColor
+			}
+		}
+	}
+	for refID, color := range map[string]string{"A": "blue", "B": "purple"} {
+		if colors[refID] != color {
+			t.Fatalf("daily Billing target %s color = %q, want %q", refID, colors[refID], color)
 		}
 	}
 	resourcePacks := panelByID(36)
